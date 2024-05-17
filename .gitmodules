@@ -4,3 +4,6 @@
 [submodule "v0/lib/v4-core"]
 	path = v0/lib/v4-core
 	url = https://github.com/Uniswap/v4-core
+[submodule "v0/lib/solmate"]
+	path = v0/lib/solmate
+	url = https://github.com/transmissions11/solmate
