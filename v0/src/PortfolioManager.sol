@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.25;
 
+import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
+
 contract PortfolioManager {
     struct Asset {
         address token;
@@ -9,28 +11,61 @@ contract PortfolioManager {
     }
 
     struct Portfolio {
-        address token;
-        // poolId
+        address inputToken;
+        address outputToken;
+        PoolId poolId;
         Asset[] assets;
         uint8 rebalanceFrequency; // n days
         uint256 rebalancedAt; // timestamp
     }
 
     struct ManagedPortfolio {
-        address token;
+        address inputToken;
+        address outputToken;
         address manager;
-        // poolId
+        PoolId poolId;
         Asset[] currentAssets;
         Asset[] targetAssets;
-        uint8 managementFee;
+        uint8 managementFeeBasisPoints;
         uint8 rebalanceFrequency; // n days
         uint256 rebalancedAt; // timestamp
     }
 
-    mapping(bytes32 portfolioId => Portfolio) internal portfolios;
-    mapping(bytes32 portfolioId => ManagedPortfolio) internal managedPortfolios;
+    uint256 internal id;
+    mapping(bytes32 hash => uint256 id) internal hashToId;
+    mapping(uint256 id => bool isManaged) internal idToIsManaged;
 
-    function createPortfolio(Asset[] memory assets) public {}
-    function modifyPortfolio(bytes32 portfolioId, Asset[] memory assets) public {}
-    function rebalancePortfolio(bytes32 portfolioId) public {}
+    mapping(uint256 id => Portfolio) internal portfolios;
+    mapping(uint256 id => ManagedPortfolio) internal managedPortfolios;
+
+    function createPortfolio(Asset[] memory assets) public {
+        // deploy ERC20
+        // create LP
+        // assets must be ordered by weight; large to small
+        // assets weights must total 100
+    }
+    function createManagedPortfolio(Asset[] memory assets) public {
+        // deploy ERC20
+        // create LP
+        // assets weights must total 100
+    }
+
+    function updateManagedPortfolio(bytes32 portfolioId, Asset[] memory assets) public {}
+
+    // function rebalancePortfolio(uint256 id) public {
+    //     // do not rebalance if this was triggered by a recursive portfolio
+    //     bool isManaged = idToIsManaged[id];
+
+    //     if (isManaged) {
+    //         ManagedPortfolio storage p = managedPortfolios[id];
+    //     } else {
+    //         Portfolio storage p = portfolios[id];
+    //     }
+    // }
+
+    function _getId() internal returns (uint256) {
+        return ++id;
+    }
+
+    function _getHash(Asset[] memory assets, uint256 rebalanceFrequency) internal returns (bytes32) {}
 }

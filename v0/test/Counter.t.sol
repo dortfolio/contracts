@@ -9,16 +9,17 @@ contract CounterTest is Test {
 
     function setUp() public {
         counter = new Counter();
-        counter.setNumber(0);
     }
 
     function test_Increment() public {
-        counter.increment();
-        assertEq(counter.number(), 1);
-    }
+        assertEq(counter.id(), 0);
 
-    function testFuzz_SetNumber(uint256 x) public {
-        counter.setNumber(x);
-        assertEq(counter.number(), x);
+        uint256 id1 = counter.getId();
+        assertEq(counter.id(), 1);
+        assertEq(counter.id(), id1);
+
+        uint256 id2 = counter.getId();
+        assertEq(counter.id(), 2);
+        assertEq(counter.id(), id2);
     }
 }
