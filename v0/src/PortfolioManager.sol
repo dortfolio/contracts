@@ -2,6 +2,8 @@
 pragma solidity ^0.8.25;
 
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {BaseHook} from "v4-periphery/BaseHook.sol";
+import {ERC20} from "solmate/tokens/ERC20.sol";
 
 contract PortfolioManager {
     struct Asset {
