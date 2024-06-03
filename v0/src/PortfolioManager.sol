@@ -70,6 +70,7 @@ contract PortfolioManager is BaseHook {
     error InvalidAssetWeightSum();
     error InvalidPortfolioID();
     error InvalidPortfolioInputToken();
+    error MustUseDynamicFee();
 
     constructor(
         IPoolManager _poolManager,
@@ -88,13 +89,13 @@ contract PortfolioManager is BaseHook {
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
-            beforeInitialize: false,
+            beforeInitialize: true,
             afterInitialize: false,
             beforeAddLiquidity: false,
             beforeRemoveLiquidity: false,
             afterAddLiquidity: true,
             afterRemoveLiquidity: true,
-            beforeSwap: false,
+            beforeSwap: true,
             afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
@@ -103,6 +104,16 @@ contract PortfolioManager is BaseHook {
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
+    }
+
+    function beforeInitialize(address, PoolKey calldata key, uint160, bytes calldata)
+        external
+        pure
+        override
+        returns (bytes4)
+    {
+        if (!key.fee.isDynamicFee()) revert MustUseDynamicFee();
+        return this.beforeInitialize.selector;
     }
 
     function beforeSwap(address, PoolKey calldata, IPoolManager.SwapParams calldata, bytes calldata)
