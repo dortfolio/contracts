@@ -4,3 +4,6 @@
 [submodule "v0/lib/solmate"]
 	path = v0/lib/solmate
 	url = https://github.com/transmissions11/solmate
+[submodule "v0/lib/v4-periphery"]
+	path = v0/lib/v4-periphery
+	url = https://github.com/Uniswap/v4-periphery
