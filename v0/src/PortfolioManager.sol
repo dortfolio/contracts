@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.25;
 
-import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
-import {PoolKey} from "v4-core/types/PoolKey.sol";
-import {BaseHook} from "v4-periphery/BaseHook.sol";
-import {Hooks} from "v4-core/libraries/Hooks.sol";
-
-import {ERC20} from "solmate/tokens/ERC20.sol";
-import {PortfolioToken} from "./PortfolioToken.sol";
-
-import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
+import {BalanceDelta, BalanceDeltaLibrary} from "v4-core/types/BalanceDelta.sol";
+import {PoolId, PoolIdLibrary, PoolKey} from "v4-core/types/PoolId.sol";
 import {PoolClaimsTest} from "v4-core/test/PoolClaimsTest.sol";
 import {PoolModifyLiquidityTest} from "v4-core/test/PoolModifyLiquidityTest.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
+
+import {BaseHook, Hooks, IHooks, IPoolManager} from "v4-periphery/BaseHook.sol";
+import {PortfolioToken, ERC20} from "./PortfolioToken.sol";
 
 contract PortfolioManager is BaseHook {
     struct Asset {
@@ -70,6 +67,10 @@ contract PortfolioManager is BaseHook {
         swapRouter = _swapRouter;
     }
 
+    /*
+        UniswapV4 Hook
+    */
+
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
@@ -89,25 +90,60 @@ contract PortfolioManager is BaseHook {
         });
     }
 
-    // beforeSwap
-    // --> discount fees for swaps pushing portfolio token price closer to NAV
-
-    // afterSwap, afterAddLiquidity, afterRemoveLiquidity
-    // --> rebalance
-
-    function createPortfolio(Asset[] memory assets) public {
-        // deploy ERC20
-        // create LP
-        // assets must be ordered by weight; large to small
-        // assets weights must total 100
-    }
-    function createManagedPortfolio(Asset[] memory assets) public {
-        // deploy ERC20
-        // create LP
-        // assets weights must total 100
+    function beforeSwap(address, PoolKey calldata, IPoolManager.SwapParams calldata, bytes calldata)
+        external
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        // discount fees for swaps pushing portfolio token price closer to NAV
+        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
-    function updateManagedPortfolio(uint256 portfolioId, Asset[] memory assets) public {
+    function afterSwap(
+        address,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        BalanceDelta delta,
+        bytes calldata
+    ) external override poolManagerOnly returns (bytes4, int128) {
+        // rebalance
+        return (IHooks.afterSwap.selector, 0);
+    }
+
+    function afterAddLiquidity(
+        address,
+        PoolKey calldata,
+        IPoolManager.ModifyLiquidityParams calldata,
+        BalanceDelta,
+        bytes calldata
+    ) external override returns (bytes4, BalanceDelta) {
+        // rebalance
+        return (IHooks.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+    }
+
+    function afterRemoveLiquidity(
+        address,
+        PoolKey calldata,
+        IPoolManager.ModifyLiquidityParams calldata,
+        BalanceDelta,
+        bytes calldata
+    ) external override returns (bytes4, BalanceDelta) {
+        // rebalance
+        return (IHooks.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+    }
+
+    /* 
+        Portfolio Management 
+    */
+
+    function create(Asset[] memory assets, address inputToken, bool isManaged) public {
+        // deploy ERC20
+        // create LP
+        // hash --> assets must be ordered by weight; large to small
+        // assets weights must total 100
+    }
+
+    function update(uint256 portfolioId, Asset[] memory assets) public {
         uint256 totalWeight;
 
         for (uint256 i; i < assets.length; i++) {
@@ -121,10 +157,10 @@ contract PortfolioManager is BaseHook {
             revert InvalidAssetWeightSum();
         }
 
-        rebalancePortfolio(portfolioId);
+        rebalance(portfolioId);
     }
 
-    function rebalancePortfolio(uint256 portfolioId) public {
+    function rebalance(uint256 portfolioId) public {
         // do not rebalance if this was triggered by a recursive portfolio
         bool isManaged = idToIsManaged[portfolioId];
 
@@ -145,7 +181,7 @@ contract PortfolioManager is BaseHook {
         if (isManaged) {
             //
         }
-        rebalancePortfolio(portfolioId);
+        rebalance(portfolioId);
     }
 
     function burn(uint256 portfolioId, uint256 amount) public {
@@ -160,24 +196,24 @@ contract PortfolioManager is BaseHook {
         if (isManaged) {
             //
         }
-        rebalancePortfolio(portfolioId);
+        rebalance(portfolioId);
     }
 
-    function getPortfolio(uint256 id) public view returns (Portfolio memory) {
+    function get(uint256 id) public view returns (Portfolio memory) {
         return portfolios[id];
     }
 
-    function getManagedPortfolio(uint256 id) public view returns (ManagedPortfolio memory) {
+    function getManaged(uint256 id) public view returns (ManagedPortfolio memory) {
         return managedPortfolios[id];
     }
 
-    function _getHash(Asset[] memory assets, uint256 rebalanceFrequency) internal returns (bytes32) {}
+    function _hash(Asset[] memory assets, uint256 rebalanceFrequency) internal returns (bytes32) {}
 
-    function _getPortfolioId() internal returns (uint256) {
+    function _id() internal returns (uint256) {
         return ++_portfolioId;
     }
 
-    function _getPortfolioNav(uint256 portfolioId) internal view returns (uint256) {
+    function _nav(uint256 portfolioId) internal view returns (uint256) {
         return 1;
     }
 }
