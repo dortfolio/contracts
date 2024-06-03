@@ -47,7 +47,8 @@ contract PortfolioManager is BaseHook {
         uint256 updatedAt; // timestamp
     }
 
-    uint256 ASSET_LIST_MAX_LENGTH = 20;
+    uint256 ASSET_LIST_MAXIMUM_LENGTH = 20;
+    uint256 ASSET_LIST_MINIMUM_LENGTH = 1;
     uint256 ASSET_WEIGHT_SUM = 100_000;
     uint8 MANGED_PORTFOLIO_MANAGEMENT_FEE = 10;
     uint160 public constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
@@ -68,8 +69,10 @@ contract PortfolioManager is BaseHook {
 
     error InvalidAssetList();
     error InvalidAssetWeightSum();
-    error InvalidPortfolioID();
+    error InvalidPortfolioId();
     error InvalidPortfolioInputToken();
+    error InvalidPortfolioManager();
+    error InvalidPortfolioRebalanceTimestamp();
     error MustUseDynamicFee();
 
     constructor(
@@ -112,16 +115,22 @@ contract PortfolioManager is BaseHook {
         override
         returns (bytes4)
     {
-        if (!key.fee.isDynamicFee()) revert MustUseDynamicFee();
+        if (!key.fee.isDynamicFee()) {
+            revert MustUseDynamicFee();
+        }
         return this.beforeInitialize.selector;
     }
 
-    function beforeSwap(address, PoolKey calldata, IPoolManager.SwapParams calldata, bytes calldata)
+    function beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, bytes calldata)
         external
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         // discount fees for swaps pushing portfolio token price closer to NAV
+        uint24 fee = _getFee(key.toId());
+
+        // Update swapFee in the manager
+        poolManager.updateDynamicLPFee(key, fee);
         return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
@@ -248,15 +257,44 @@ contract PortfolioManager is BaseHook {
         }
     }
 
-    function update(uint256 portfolioId, Asset[] memory assets, uint8 rebalanceFrequency) public {
+    function update(uint256 portfolioId, Asset[] memory assets, uint8 rebalanceFrequency)
+        public
+        onlyManager(portfolioId)
+    {
         bytes32 hash = _hash(assets, rebalanceFrequency);
+        ManagedPortfolio memory mp = managedPortfolios[portfolioId];
+        bytes32 targetHash = _hash(mp.targetAssets, mp.rebalanceFrequency);
+
+        if (hash != targetHash) {
+            mp.targetAssets = assets;
+            mp.rebalanceFrequency = rebalanceFrequency;
+        }
 
         rebalance(portfolioId);
     }
 
     function rebalance(uint256 portfolioId) public {
-        // do not rebalance if this was triggered by a recursive portfolio
         bool isManaged = idToIsManaged[portfolioId];
+
+        if (isManaged) {
+            ManagedPortfolio memory mp = managedPortfolios[portfolioId];
+            if (mp.currentAssets.length == 0) {
+                revert InvalidPortfolioId();
+            }
+            if (block.timestamp < mp.rebalancedAt + _daysToSeconds(mp.rebalanceFrequency)) {
+                revert InvalidPortfolioRebalanceTimestamp();
+            }
+            // poolManager.unlock();
+        } else {
+            Portfolio memory p = portfolios[portfolioId];
+            if (p.assets.length == 0) {
+                revert InvalidPortfolioId();
+            }
+            if (block.timestamp < p.rebalancedAt + _daysToSeconds(p.rebalanceFrequency)) {
+                revert InvalidPortfolioRebalanceTimestamp();
+            }
+            // poolManager.unlock();
+        }
 
         /*
         struct CallbackData {
@@ -271,17 +309,11 @@ contract PortfolioManager is BaseHook {
             bool settleUsingBurn;
         }
         */
-
-        if (isManaged) {
-            ManagedPortfolio storage p = managedPortfolios[portfolioId];
-        } else {
-            Portfolio storage p = portfolios[portfolioId];
-        }
     }
 
     function mint(uint256 portfolioId, uint256 amount) public {
         if (portfolioId > _portfolioId) {
-            revert InvalidPortfolioID();
+            revert InvalidPortfolioId();
         }
         bool isManaged = idToIsManaged[portfolioId];
 
@@ -295,7 +327,7 @@ contract PortfolioManager is BaseHook {
     function burn(uint256 portfolioId, uint256 amount) public {
         // portfolio sells tokens using the deposited amount
         if (portfolioId > _portfolioId) {
-            revert InvalidPortfolioID();
+            revert InvalidPortfolioId();
         }
         bool isManaged = idToIsManaged[portfolioId];
 
@@ -320,7 +352,7 @@ contract PortfolioManager is BaseHook {
     }
 
     function _hash(Asset[] memory assets, uint8 rebalanceFrequency) internal view returns (bytes32) {
-        if (assets.length > ASSET_LIST_MAX_LENGTH) {
+        if (assets.length > ASSET_LIST_MAXIMUM_LENGTH || assets.length < ASSET_LIST_MINIMUM_LENGTH) {
             revert InvalidAssetList();
         }
 
@@ -342,7 +374,22 @@ contract PortfolioManager is BaseHook {
         return keccak256(abi.encode(assets, rebalanceFrequency));
     }
 
+    function _getFee(PoolId poolId) internal returns (uint24) {
+        return 1;
+    }
+
     function _nav(uint256 portfolioId) internal view returns (uint256) {
         return 1;
+    }
+
+    function _daysToSeconds(uint8 d) internal pure returns (uint256) {
+        return uint256(d) * 60 * 60 * 24;
+    }
+
+    modifier onlyManager(uint256 portfolioId) {
+        if (msg.sender != managedPortfolios[portfolioId].manager) {
+            revert InvalidPortfolioManager();
+        }
+        _;
     }
 }
