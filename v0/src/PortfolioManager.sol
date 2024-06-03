@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.25;
 
-import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 import {BalanceDelta, BalanceDeltaLibrary} from "v4-core/types/BalanceDelta.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
+import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {PoolId, PoolIdLibrary, PoolKey} from "v4-core/types/PoolId.sol";
+
 import {PoolClaimsTest} from "v4-core/test/PoolClaimsTest.sol";
 import {PoolModifyLiquidityTest} from "v4-core/test/PoolModifyLiquidityTest.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 
 import {BaseHook, Hooks, IHooks, IPoolManager} from "v4-periphery/BaseHook.sol";
+import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
+import {Strings} from "openzeppelin/utils/Strings.sol";
 import {PortfolioToken, ERC20} from "./PortfolioToken.sol";
 
 contract PortfolioManager is BaseHook {
+    using LPFeeLibrary for uint24;
+    using PoolIdLibrary for PoolKey;
+
     struct Asset {
         address token; // address(0) = eth
         uint8 targetWeight;
@@ -40,8 +47,16 @@ contract PortfolioManager is BaseHook {
         uint256 updatedAt; // timestamp
     }
 
+    uint256 ASSET_LIST_MAX_LENGTH = 20;
+    uint256 ASSET_WEIGHT_SUM = 100_000;
+    uint8 MANGED_PORTFOLIO_MANAGEMENT_FEE = 10;
+    uint160 public constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
+    bytes constant ZERO_BYTES = new bytes(0);
+
     uint256 internal _portfolioId;
+
     mapping(bytes32 hash => uint256 id) internal hashToId;
+    mapping(PoolId poolId => uint256 id) internal poolIdToId;
     mapping(uint256 id => bool isManaged) internal idToIsManaged;
 
     mapping(uint256 id => Portfolio) internal portfolios;
@@ -51,10 +66,10 @@ contract PortfolioManager is BaseHook {
     PoolModifyLiquidityTest internal modifyLiquidityRouter;
     PoolSwapTest internal swapRouter;
 
-    uint256 ASSET_WEIGHT_SUM = 100_000;
-
+    error InvalidAssetList();
     error InvalidAssetWeightSum();
     error InvalidPortfolioID();
+    error InvalidPortfolioInputToken();
 
     constructor(
         IPoolManager _poolManager,
@@ -132,30 +147,98 @@ contract PortfolioManager is BaseHook {
         return (IHooks.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
+    function initPool(
+        Currency _currency0,
+        Currency _currency1,
+        IHooks hooks,
+        uint24 fee,
+        uint160 sqrtPriceX96,
+        bytes memory initData
+    ) internal returns (PoolKey memory _key, PoolId id) {
+        _key = PoolKey(_currency0, _currency1, fee, fee.isDynamicFee() ? int24(60) : int24(fee / 100 * 2), hooks);
+        id = _key.toId();
+        poolManager.initialize(_key, sqrtPriceX96, initData);
+    }
+
+    // function initPool(
+    //     Currency _currency0,
+    //     Currency _currency1,
+    //     IHooks hooks,
+    //     uint24 fee,
+    //     int24 tickSpacing,
+    //     uint160 sqrtPriceX96,
+    //     bytes memory initData
+    // ) internal returns (PoolKey memory _key, PoolId id) {
+    //     _key = PoolKey(_currency0, _currency1, fee, tickSpacing, hooks);
+    //     id = _key.toId();
+    //     poolManager.initialize(_key, sqrtPriceX96, initData);
+    // }
+
     /* 
         Portfolio Management 
     */
 
-    function create(Asset[] memory assets, address inputToken, bool isManaged) public {
-        // deploy ERC20
-        // create LP
-        // hash --> assets must be ordered by weight; large to small
-        // assets weights must total 100
+    function create(Asset[] memory assets, address inputToken, uint8 rebalanceFrequency, bool isManaged) public {
+        bytes32 hash = _hash(assets, rebalanceFrequency);
+
+        uint256 id = _id();
+        string memory name = string.concat("Dortfolio ", Strings.toString(id));
+        string memory symbol = string.concat("DORT_", Strings.toString(id));
+
+        PortfolioToken pt = new PortfolioToken(address(this), name, symbol);
+        address portfolioToken = address(pt);
+
+        Currency currency0;
+        Currency currency1;
+        if (inputToken < portfolioToken) {
+            currency0 = Currency.wrap(inputToken);
+            currency1 = Currency.wrap(portfolioToken);
+        } else if (inputToken > portfolioToken) {
+            currency0 = Currency.wrap(portfolioToken);
+            currency1 = Currency.wrap(inputToken);
+        } else {
+            revert InvalidPortfolioInputToken();
+        }
+
+        ( /*PoolKey memory poolKey*/ , PoolId poolId) = initPool(
+            currency0,
+            currency1,
+            IHooks(address(this)),
+            LPFeeLibrary.DYNAMIC_FEE_FLAG, // Set the `DYNAMIC_FEE_FLAG` in place of specifying a fixed fee
+            SQRT_PRICE_1_1,
+            ZERO_BYTES
+        );
+
+        hashToId[hash] = id;
+        poolIdToId[poolId] = id;
+
+        if (isManaged) {
+            managedPortfolios[id] = ManagedPortfolio({
+                inputToken: inputToken,
+                portfolioToken: pt,
+                manager: msg.sender,
+                poolId: poolId,
+                currentAssets: assets,
+                targetAssets: assets,
+                managementFeeBasisPoints: MANGED_PORTFOLIO_MANAGEMENT_FEE,
+                rebalanceFrequency: rebalanceFrequency,
+                rebalancedAt: 0,
+                updatedAt: 0
+            });
+        } else {
+            portfolios[id] = Portfolio({
+                inputToken: inputToken,
+                portfolioToken: pt,
+                poolId: poolId,
+                assets: assets,
+                rebalanceFrequency: rebalanceFrequency,
+                rebalancedAt: 0
+            });
+        }
     }
 
-    function update(uint256 portfolioId, Asset[] memory assets) public {
-        uint256 totalWeight;
-
-        for (uint256 i; i < assets.length; i++) {
-            // Asset memory a = assets[i];
-            // a.targetWeight
-            totalWeight += assets[i].targetWeight;
-        }
-
-        if (totalWeight != ASSET_WEIGHT_SUM) {
-            // make 100_000 a constant
-            revert InvalidAssetWeightSum();
-        }
+    function update(uint256 portfolioId, Asset[] memory assets, uint8 rebalanceFrequency) public {
+        bytes32 hash = _hash(assets, rebalanceFrequency);
 
         rebalance(portfolioId);
     }
@@ -163,6 +246,20 @@ contract PortfolioManager is BaseHook {
     function rebalance(uint256 portfolioId) public {
         // do not rebalance if this was triggered by a recursive portfolio
         bool isManaged = idToIsManaged[portfolioId];
+
+        /*
+        struct CallbackData {
+            address sender;
+            TestSettings testSettings;
+            PoolKey key;
+            IPoolManager.SwapParams params;
+            bytes hookData;
+        }
+        struct TestSettings {
+            bool takeClaims;
+            bool settleUsingBurn;
+        }
+        */
 
         if (isManaged) {
             ManagedPortfolio storage p = managedPortfolios[portfolioId];
@@ -207,10 +304,31 @@ contract PortfolioManager is BaseHook {
         return managedPortfolios[id];
     }
 
-    function _hash(Asset[] memory assets, uint256 rebalanceFrequency) internal returns (bytes32) {}
-
     function _id() internal returns (uint256) {
         return ++_portfolioId;
+    }
+
+    function _hash(Asset[] memory assets, uint8 rebalanceFrequency) internal view returns (bytes32) {
+        if (assets.length > ASSET_LIST_MAX_LENGTH) {
+            revert InvalidAssetList();
+        }
+
+        uint256 totalWeight = assets[0].targetWeight;
+
+        for (uint256 i = 1; i < assets.length; i++) {
+            // addresses must be sorted and unique
+            if (assets[i - 1].token >= assets[i].token) {
+                revert InvalidAssetList();
+            }
+            totalWeight += assets[i].targetWeight;
+        }
+
+        // asset weights must total 100%
+        if (totalWeight != ASSET_WEIGHT_SUM) {
+            revert InvalidAssetWeightSum();
+        }
+
+        return keccak256(abi.encode(assets, rebalanceFrequency));
     }
 
     function _nav(uint256 portfolioId) internal view returns (uint256) {
