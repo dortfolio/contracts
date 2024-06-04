@@ -134,9 +134,7 @@ contract PortfolioManager is BaseHook {
         // discount fees for swaps pushing portfolio token price closer to NAV
         uint24 fee = _getFee(key.toId());
 
-        // Update swapFee in the manager
-        poolManager.updateDynamicLPFee(key, fee);
-        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, fee);
     }
 
     function afterSwap(
@@ -290,7 +288,7 @@ contract PortfolioManager is BaseHook {
     function update(uint256 portfolioId, Asset[] calldata assetList, uint8 rebalanceFrequency)
         public
         onlyManager(portfolioId)
-        validate(portfolioId)
+        validateId(portfolioId)
     {
         ManagedPortfolio storage mp = managedPortfolios[portfolioId];
 
@@ -369,13 +367,13 @@ contract PortfolioManager is BaseHook {
         */
     }
 
-    function mint(uint256 portfolioId, uint256 spendAmount) public validate(portfolioId) {
+    function mint(uint256 portfolioId, uint256 spendAmount) public validateId(portfolioId) {
         // portfolio buys tokens using the deposited amount
         // revert if no EIP-2612 permit to spend token amount
         rebalance(portfolioId);
     }
 
-    function burn(uint256 portfolioId, uint256 burnAmount) public validate(portfolioId) {
+    function burn(uint256 portfolioId, uint256 burnAmount) public validateId(portfolioId) {
         // revert if no EIP-2612 permit to spend token amount
         // portfolio buys tokens using the deposited amount
         rebalance(portfolioId);
@@ -439,7 +437,7 @@ contract PortfolioManager is BaseHook {
         _;
     }
 
-    modifier validate(uint256 portfolioId) {
+    modifier validateId(uint256 portfolioId) {
         if (portfolioId > _portfolioId) {
             revert InvalidPortfolioId();
         }
