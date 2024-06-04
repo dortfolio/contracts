@@ -54,18 +54,18 @@ contract PortfolioManager is BaseHook {
         uint256 updatedAt; // timestamp
     }
 
+    mapping(PoolId poolId => uint256 id) public poolIdToId;
+    mapping(uint256 id => bool isManaged) public idToIsManaged;
+
+    mapping(uint256 id => Portfolio) public portfolios;
+    mapping(uint256 id => mapping(address => Asset)) public portfolioAssets;
+    mapping(bytes32 hash => uint256 id) public portfolioHashToId;
+
+    mapping(uint256 id => ManagedPortfolio) public managedPortfolios;
+    mapping(uint256 id => mapping(address => Asset)) public managedPortfolioCurrentAssets;
+    mapping(uint256 id => mapping(address => Asset)) public managedPortfolioTargetAssets;
+
     uint256 internal _portfolioId;
-
-    mapping(PoolId poolId => uint256 id) internal poolIdToId;
-    mapping(uint256 id => bool isManaged) internal idToIsManaged;
-
-    mapping(uint256 id => Portfolio) internal portfolios;
-    mapping(uint256 id => mapping(address => Asset)) internal portfolioAssets;
-    mapping(bytes32 hash => uint256 id) internal portfolioHashToId;
-
-    mapping(uint256 id => ManagedPortfolio) internal managedPortfolios;
-    mapping(uint256 id => mapping(address => Asset)) internal managedPortfolioCurrentAssets;
-    mapping(uint256 id => mapping(address => Asset)) internal managedPortfolioTargetAssets;
 
     PoolClaimsTest internal claimsRouter;
     PoolModifyLiquidityTest internal modifyLiquidityRouter;
@@ -235,17 +235,22 @@ contract PortfolioManager is BaseHook {
     */
 
     function create(Asset[] calldata assetList, address inputToken, uint8 rebalanceFrequency, bool isManaged) public {
+        // validate assetList
         bytes32 hash = _hash(assetList, rebalanceFrequency);
+
+        // deploy new token and pool
         uint256 id = _id();
         PortfolioToken portfolioToken = _createToken(id);
         PoolId poolId = _createPool(inputToken, address(portfolioToken));
 
+        // state update
         poolIdToId[poolId] = id;
 
+        // construct assetAddresses
         address[] memory assetAddresses = new address[](assetList.length);
         for (uint8 i = 0; i < assetList.length; i++) {
             assetAddresses[i] = assetList[i].token;
-
+            // state updates
             if (isManaged) {
                 managedPortfolioCurrentAssets[id][assetList[i].token] = assetList[i];
                 managedPortfolioTargetAssets[id][assetList[i].token] = assetList[i];
@@ -254,6 +259,7 @@ contract PortfolioManager is BaseHook {
             }
         }
 
+        // state updates
         if (isManaged) {
             managedPortfolios[id] = ManagedPortfolio({
                 inputToken: inputToken,
@@ -288,15 +294,18 @@ contract PortfolioManager is BaseHook {
     {
         ManagedPortfolio storage mp = managedPortfolios[portfolioId];
 
+        // construct targetAssetList
         Asset[] memory targetAssetList = new Asset[](mp.targetAssetAddresses.length);
         for (uint8 i = 0; i < mp.targetAssetAddresses.length; i++) {
             address a = mp.targetAssetAddresses[i];
             Asset memory asset = managedPortfolioTargetAssets[portfolioId][a];
             targetAssetList[i] = asset;
 
+            // state update: reset old targetAsset
             managedPortfolioTargetAssets[portfolioId][a] = Asset({token: a, targetWeight: 0, amountHeld: 0});
         }
 
+        // validate new assetList and ensure it is different from targetAssetList
         bytes32 hash = _hash(assetList, rebalanceFrequency);
         bytes32 targetHash = _hash(targetAssetList, mp.rebalanceFrequency);
         if (hash == targetHash) {
@@ -306,11 +315,14 @@ contract PortfolioManager is BaseHook {
         address[] memory targetAssetAddresses = new address[](assetList.length);
         for (uint8 i = 0; i < assetList.length; i++) {
             targetAssetAddresses[i] = assetList[i].token;
+            // state update: set new targetAsset
             managedPortfolioTargetAssets[portfolioId][assetList[i].token] = assetList[i];
         }
 
+        // state updates
         mp.targetAssetAddresses = targetAssetAddresses;
         mp.rebalanceFrequency = rebalanceFrequency;
+
         rebalance(portfolioId);
     }
 
@@ -357,13 +369,13 @@ contract PortfolioManager is BaseHook {
         */
     }
 
-    function mint(uint256 portfolioId, uint256 amount) public validate(portfolioId) {
+    function mint(uint256 portfolioId, uint256 spendAmount) public validate(portfolioId) {
         // portfolio buys tokens using the deposited amount
         // revert if no EIP-2612 permit to spend token amount
         rebalance(portfolioId);
     }
 
-    function burn(uint256 portfolioId, uint256 amount) public validate(portfolioId) {
+    function burn(uint256 portfolioId, uint256 burnAmount) public validate(portfolioId) {
         // revert if no EIP-2612 permit to spend token amount
         // portfolio buys tokens using the deposited amount
         rebalance(portfolioId);
