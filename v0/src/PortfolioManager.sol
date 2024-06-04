@@ -65,6 +65,8 @@ contract PortfolioManager is BaseHook {
     mapping(uint256 id => mapping(address => Asset)) public managedPortfolioCurrentAssets;
     mapping(uint256 id => mapping(address => Asset)) public managedPortfolioTargetAssets;
 
+    mapping(bytes32 pair => PoolKey poolKey) public _pairToPoolKey; // Hackathon helper
+
     uint256 internal _portfolioId;
 
     PoolClaimsTest internal claimsRouter;
@@ -131,42 +133,38 @@ contract PortfolioManager is BaseHook {
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        // discount fees for swaps pushing portfolio token price closer to NAV
-        uint24 fee = _getFee(key.toId());
-
-        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, fee);
+        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, _fee(poolIdToId[key.toId()]));
     }
 
-    function afterSwap(
-        address,
-        PoolKey calldata key,
-        IPoolManager.SwapParams calldata params,
-        BalanceDelta delta,
-        bytes calldata
-    ) external override poolManagerOnly returns (bytes4, int128) {
-        // rebalance
+    function afterSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, BalanceDelta, bytes calldata)
+        external
+        override
+        poolManagerOnly
+        returns (bytes4, int128)
+    {
+        rebalance(poolIdToId[key.toId()]);
         return (IHooks.afterSwap.selector, 0);
     }
 
     function afterAddLiquidity(
         address,
-        PoolKey calldata,
+        PoolKey calldata key,
         IPoolManager.ModifyLiquidityParams calldata,
         BalanceDelta,
         bytes calldata
     ) external override returns (bytes4, BalanceDelta) {
-        // rebalance
+        rebalance(poolIdToId[key.toId()]);
         return (IHooks.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
     function afterRemoveLiquidity(
         address,
-        PoolKey calldata,
+        PoolKey calldata key,
         IPoolManager.ModifyLiquidityParams calldata,
         BalanceDelta,
         bytes calldata
     ) external override returns (bytes4, BalanceDelta) {
-        // rebalance
+        rebalance(poolIdToId[key.toId()]);
         return (IHooks.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
@@ -234,7 +232,7 @@ contract PortfolioManager is BaseHook {
 
     function create(Asset[] calldata assetList, address inputToken, uint8 rebalanceFrequency, bool isManaged) public {
         // validate assetList
-        bytes32 hash = _hash(assetList, rebalanceFrequency);
+        bytes32 hash = _hash(assetList, inputToken, rebalanceFrequency);
 
         // deploy new token and pool
         uint256 id = _id();
@@ -304,8 +302,8 @@ contract PortfolioManager is BaseHook {
         }
 
         // validate new assetList and ensure it is different from targetAssetList
-        bytes32 hash = _hash(assetList, rebalanceFrequency);
-        bytes32 targetHash = _hash(targetAssetList, mp.rebalanceFrequency);
+        bytes32 hash = _hash(assetList, mp.inputToken, rebalanceFrequency);
+        bytes32 targetHash = _hash(targetAssetList, mp.inputToken, mp.rebalanceFrequency);
         if (hash == targetHash) {
             revert InvalidPortfolioUpdate();
         }
@@ -350,7 +348,7 @@ contract PortfolioManager is BaseHook {
             // populate unlockCallback
         }
 
-        // poolManager.unlock();
+        poolManager.unlock(abi.encodeCall(this._rebalance, (isManaged, msg.sender)));
 
         /*
         struct CallbackData {
@@ -366,6 +364,11 @@ contract PortfolioManager is BaseHook {
         }
         */
     }
+    // https://docs.uniswap.org/contracts/v4/concepts/lock-mechanism
+    // https://github.com/kadenzipfel/uni-lbp/blob/main/src/LiquidityBootstrappingHooks.sol#L501
+    // lock was renamed to unlock --> https://github.com/Uniswap/v4-core/pull/508
+
+    function _rebalance(bool isManaged, address sender) external selfOnly {}
 
     function mint(uint256 portfolioId, uint256 spendAmount) public validateId(portfolioId) {
         // portfolio buys tokens using the deposited amount
@@ -379,6 +382,10 @@ contract PortfolioManager is BaseHook {
         rebalance(portfolioId);
     }
 
+    /*
+        Getters
+    */
+
     function get(uint256 id) public view returns (Portfolio memory) {
         return portfolios[id];
     }
@@ -387,11 +394,35 @@ contract PortfolioManager is BaseHook {
         return managedPortfolios[id];
     }
 
+    /*
+        Hackathon Helpers
+        PortfolioManager needs a way to know about pools in PoolManager
+        In the future, we will use Uniswap's default router
+    */
+
+    function _addPair(PoolKey memory poolKey) public returns (PoolId) {
+        address a = address(Currency.unwrap(poolKey.currency0));
+        address b = address(Currency.unwrap(poolKey.currency1));
+        bytes32 hash = _hashPair(a, b);
+        _pairToPoolKey[hash] = poolKey;
+        return poolKey.toId();
+    }
+
+    function _hashPair(address a, address b) public pure returns (bytes32) {
+        return keccak256(abi.encode(a, b));
+    }
+
+    /*
+        Utilities
+    */
+
     function _id() internal returns (uint256) {
         return ++_portfolioId;
     }
 
-    function _getFee(PoolId poolId) internal view returns (uint24) {
+    function _fee(uint256 portfolioId) internal view returns (uint24) {
+        // discount fees for swaps pushing portfolio token price closer to NAV
+
         // if pt price < nav/shares --> discount buys
         // if pt price > nav/shares --> discount sells
 
@@ -407,7 +438,11 @@ contract PortfolioManager is BaseHook {
         return uint256(d) * 60 * 60 * 24;
     }
 
-    function _hash(Asset[] memory assetList, uint8 rebalanceFrequency) internal pure returns (bytes32) {
+    function _hash(Asset[] memory assetList, address inputToken, uint8 rebalanceFrequency)
+        internal
+        pure
+        returns (bytes32)
+    {
         if (assetList.length > ASSET_LIST_MAXIMUM_LENGTH || assetList.length < ASSET_LIST_MINIMUM_LENGTH) {
             revert InvalidAssetList();
         }
@@ -427,8 +462,12 @@ contract PortfolioManager is BaseHook {
             revert InvalidAssetWeightSum();
         }
 
-        return keccak256(abi.encode(assetList, rebalanceFrequency));
+        return keccak256(abi.encode(assetList, inputToken, rebalanceFrequency));
     }
+
+    /*
+        Modifiers
+    */
 
     modifier onlyManager(uint256 portfolioId) {
         if (msg.sender != managedPortfolios[portfolioId].manager) {
