@@ -197,7 +197,7 @@ contract PortfolioManager is BaseHook {
     //     poolManager.initialize(_key, sqrtPriceX96, initData);
     // }
 
-    function _createPool(address inputToken, address portfolioToken) internal returns (PoolId) {
+    function _createLiquidityPool(address inputToken, address portfolioToken) internal returns (PoolId) {
         Currency currency0;
         Currency currency1;
         if (inputToken < portfolioToken) {
@@ -222,7 +222,7 @@ contract PortfolioManager is BaseHook {
         return poolId;
     }
 
-    function _createToken(uint256 id) internal returns (PortfolioToken) {
+    function _createPortfolioToken(uint256 id) internal returns (PortfolioToken) {
         string memory name = string.concat("Dortfolio ", Strings.toString(id));
         string memory symbol = string.concat("DORT_", Strings.toString(id));
         return new PortfolioToken(address(this), name, symbol);
@@ -238,8 +238,8 @@ contract PortfolioManager is BaseHook {
 
         // deploy new token and pool
         uint256 id = _id();
-        PortfolioToken portfolioToken = _createToken(id);
-        PoolId poolId = _createPool(inputToken, address(portfolioToken));
+        PortfolioToken portfolioToken = _createPortfolioToken(id);
+        PoolId poolId = _createLiquidityPool(inputToken, address(portfolioToken));
 
         // state update
         poolIdToId[poolId] = id;
