@@ -115,18 +115,10 @@ contract PortfolioManagerTest is Test, Deployers {
         assets[0] = PortfolioManager.Asset(address(Currency.unwrap(eth)), 18, 30_000, 0);
         assets[1] = PortfolioManager.Asset(address(Currency.unwrap(wbtc)), 18, 50_000, 0);
         assets[2] = PortfolioManager.Asset(address(Currency.unwrap(wsol)), 18, 20_000, 0);
-
         uint256 id = pm.create(sortAssets(assets), address(Currency.unwrap(stablecoin)), 30, false);
-        console.logUint(pm.nav(id, false));
-    }
 
-    function test_create_navTest() public {
-        PortfolioManager.Asset[] memory assets = new PortfolioManager.Asset[](3);
-        assets[0] = PortfolioManager.Asset(address(Currency.unwrap(eth)), 18, 30_000, 0);
-        assets[1] = PortfolioManager.Asset(address(Currency.unwrap(wbtc)), 18, 50_000, 0);
-        assets[2] = PortfolioManager.Asset(address(Currency.unwrap(wsol)), 18, 20_000, 0);
-        uint256 id = pm.create(sortAssets(assets), address(Currency.unwrap(stablecoin)), 30, false);
-        console.logUint(pm.navTest(id, false));
+        uint256 nav = pm.nav(id, false);
+        assertEq(nav, 0);
     }
 
     function test_addPair() public {
