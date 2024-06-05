@@ -4,17 +4,21 @@ pragma solidity ^0.8.13;
 import {Test, console} from "forge-std/Test.sol";
 import {Deployers, MockERC20, SortTokens} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {
+    Asset,
     Currency,
     CurrencyLibrary,
     Hooks,
     IHooks,
     IPoolManager,
+    LPFeeLibrary,
     PoolClaimsTest,
     PoolId,
+    PoolIdLibrary,
     PoolKey,
     PoolModifyLiquidityTest,
     PoolSwapTest,
-    PortfolioManager
+    PortfolioManager,
+    StateLibrary
 } from "../src/PortfolioManager.sol";
 
 contract PortfolioManagerHarness is PortfolioManager {
@@ -31,6 +35,10 @@ contract PortfolioManagerHarness is PortfolioManager {
 }
 
 contract PortfolioManagerTest is Test, Deployers {
+    using LPFeeLibrary for uint24;
+    using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
+
     PortfolioManagerHarness public pm;
 
     Currency public eth = CurrencyLibrary.NATIVE;
@@ -55,15 +63,16 @@ contract PortfolioManagerTest is Test, Deployers {
             "PortfolioManagerHarness", abi.encode(manager, claimsRouter, modifyLiquidityRouter, swapRouter), hookAddress
         );
         pm = PortfolioManagerHarness(hookAddress);
-        deployTokens();
+        deployTokensAndPools();
     }
 
-    function deployTokens() public {
+    function deployTokensAndPools() public {
         stablecoin = deployMintAndApproveCurrency();
 
         Currency currency0;
         Currency currency1;
         PoolKey memory key;
+        PoolId id;
 
         wbtc = deployMintAndApproveCurrency();
         (currency0, currency1) =
@@ -86,8 +95,13 @@ contract PortfolioManagerTest is Test, Deployers {
             SortTokens.sort(MockERC20(Currency.unwrap(stablecoin)), MockERC20(Currency.unwrap(uni)));
         (key,) = initPoolAndAddLiquidity(currency0, currency1, NO_HOOK, FEE, SQRT_PRICE_4_1, ZERO_BYTES);
         pm._addPair(key);
-        (key,) = initPoolAndAddLiquidityETH(eth, uni, NO_HOOK, FEE, SQRT_PRICE_1_1, ZERO_BYTES, 10 ether);
+        (key, id) = initPoolAndAddLiquidityETH(eth, uni, NO_HOOK, FEE, SQRT_PRICE_1_1, ZERO_BYTES, 10 ether);
         pm._addPair(key);
+    }
+
+    function test_create() public {
+        Asset[] memory assets;
+        pm.create(assets, address(Currency.unwrap(stablecoin)), 30, false);
     }
 
     function test_addPair() public {
@@ -103,7 +117,22 @@ contract PortfolioManagerTest is Test, Deployers {
             pm._pairToPoolKey(hash);
         PoolKey memory _poolKey = PoolKey(_currency0, _currency1, _fee, _tickSpacing, _hooks);
 
-        assertEq(keccak256(abi.encode(_poolKey)), keccak256(abi.encode(poolKey)));
+        assertEq(abi.encode(_poolKey.toId()), abi.encode(poolKey.toId()));
+    }
+
+    function testFuzz_hashPair(address a, address b) public view {
+        address currency0;
+        address currency1;
+
+        if (a < b) {
+            currency0 = a;
+            currency1 = b;
+        } else {
+            currency0 = b;
+            currency1 = a;
+        }
+
+        assertEq(pm._hashPair(a, b), keccak256(abi.encode(currency0, currency1)));
     }
 
     function test_id() public {
