@@ -4,7 +4,6 @@ pragma solidity ^0.8.13;
 import {Test, console} from "forge-std/Test.sol";
 import {Deployers, MockERC20, SortTokens} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {
-    Asset,
     Currency,
     CurrencyLibrary,
     Hooks,
@@ -99,9 +98,35 @@ contract PortfolioManagerTest is Test, Deployers {
         pm._addPair(key);
     }
 
-    function test_create() public {
-        Asset[] memory assets;
-        pm.create(assets, address(Currency.unwrap(stablecoin)), 30, false);
+    function sortAssets(PortfolioManager.Asset[] memory assets) public pure returns (PortfolioManager.Asset[] memory) {
+        for (uint256 i = assets.length - 1; i > 0; i--) {
+            for (uint256 j = 0; j < i; j++) {
+                if (assets[i].token < assets[j].token) {
+                    (assets[i], assets[j]) = (assets[j], assets[i]);
+                }
+            }
+        }
+
+        return assets;
+    }
+
+    function test_create_navUnlock() public {
+        PortfolioManager.Asset[] memory assets = new PortfolioManager.Asset[](3);
+        assets[0] = PortfolioManager.Asset(address(Currency.unwrap(eth)), 18, 30_000, 0);
+        assets[1] = PortfolioManager.Asset(address(Currency.unwrap(wbtc)), 18, 50_000, 0);
+        assets[2] = PortfolioManager.Asset(address(Currency.unwrap(wsol)), 18, 20_000, 0);
+
+        uint256 id = pm.create(sortAssets(assets), address(Currency.unwrap(stablecoin)), 30, false);
+        console.logUint(pm.nav(id, false));
+    }
+
+    function test_create_navTest() public {
+        PortfolioManager.Asset[] memory assets = new PortfolioManager.Asset[](3);
+        assets[0] = PortfolioManager.Asset(address(Currency.unwrap(eth)), 18, 30_000, 0);
+        assets[1] = PortfolioManager.Asset(address(Currency.unwrap(wbtc)), 18, 50_000, 0);
+        assets[2] = PortfolioManager.Asset(address(Currency.unwrap(wsol)), 18, 20_000, 0);
+        uint256 id = pm.create(sortAssets(assets), address(Currency.unwrap(stablecoin)), 30, false);
+        console.logUint(pm.navTest(id, false));
     }
 
     function test_addPair() public {
