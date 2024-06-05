@@ -24,13 +24,15 @@ contract PortfolioManager is BaseHook {
     uint256 public constant ASSET_LIST_MAXIMUM_LENGTH = 20;
     uint256 public constant ASSET_LIST_MINIMUM_LENGTH = 2;
     uint256 internal constant ASSET_WEIGHT_SUM = 100_000;
+    uint24 public constant DEFAULT_SWAP_FEE = 1000;
+    uint24 public constant DISCOUNTED_SWAP_FEE = 500;
     uint8 public constant MANGED_PORTFOLIO_MANAGEMENT_FEE = 10;
     uint160 public constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
     bytes constant ZERO_BYTES = new bytes(0);
 
     struct Asset {
         address token; // address(0) = eth
-        uint8 decimals;
+        uint256 decimals;
         uint24 targetWeight;
         uint256 amountHeld;
     }
@@ -130,12 +132,13 @@ contract PortfolioManager is BaseHook {
         return this.beforeInitialize.selector;
     }
 
-    function beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, bytes calldata)
+    function beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata swapParams, bytes calldata)
         external
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, _fee(poolIdToId[key.toId()]));
+        uint256 portfolioId = poolIdToId[key.toId()];
+        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, _fee(portfolioId, key, swapParams));
     }
 
     function afterSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, BalanceDelta, bytes calldata)
@@ -346,7 +349,7 @@ contract PortfolioManager is BaseHook {
         rebalance(portfolioId);
     }
 
-    function rebalance(uint256 portfolioId) public {
+    function rebalance(uint256 portfolioId) public returns (bool didRebalance) {
         if (portfolioId > _portfolioId) {
             revert InvalidPortfolioId();
         }
@@ -358,7 +361,7 @@ contract PortfolioManager is BaseHook {
                 revert InvalidPortfolioId();
             }
             if (block.timestamp < mp.rebalancedAt + (mp.rebalanceFrequency * 1 days)) {
-                return;
+                didRebalance = false;
             }
             // populate unlockCallback
         } else {
@@ -367,7 +370,7 @@ contract PortfolioManager is BaseHook {
                 revert InvalidPortfolioId();
             }
             if (block.timestamp < p.rebalancedAt + (p.rebalanceFrequency * 1 days)) {
-                return;
+                didRebalance = false;
             }
             // populate unlockCallback
         }
@@ -375,6 +378,8 @@ contract PortfolioManager is BaseHook {
         // https://docs.uniswap.org/contracts/v4/concepts/lock-mechanism
         // lock was renamed to unlock --> https://github.com/Uniswap/v4-core/pull/508
         poolManager.unlock(abi.encodeCall(this._rebalance, (isManaged, msg.sender)));
+        didRebalance = true;
+        return didRebalance;
 
         /*
         struct CallbackData {
@@ -393,49 +398,42 @@ contract PortfolioManager is BaseHook {
 
     function _rebalance(bool isManaged, address sender) external selfOnly {}
 
-    //
-    //
-    // NAV TEST
-    function navTest(uint256 portfolioId, bool isManaged) public view returns (uint256) {
-        Asset[] memory assetList;
-        PoolKey[] memory assetPoolKeys;
-        if (isManaged) {
-            ManagedPortfolio memory portfolio = managedPortfolios[portfolioId];
-            address[] memory assetAddresses = portfolio.currentAssetAddresses;
-            assetList = new Asset[](assetAddresses.length);
-            assetPoolKeys = new PoolKey[](assetAddresses.length);
+    // function navInline(uint256 portfolioId, bool isManaged) public view returns (uint256 navSqrtPriceX96) {
+    //     Asset[] memory assetList;
+    //     PoolKey[] memory assetPoolKeys;
+    //     if (isManaged) {
+    //         ManagedPortfolio memory portfolio = managedPortfolios[portfolioId];
+    //         address[] memory assetAddresses = portfolio.currentAssetAddresses;
+    //         assetList = new Asset[](assetAddresses.length);
+    //         assetPoolKeys = new PoolKey[](assetAddresses.length);
 
-            for (uint8 i = 0; i < assetAddresses.length; i++) {
-                assetList[i] = managedPortfolioCurrentAssets[portfolioId][assetAddresses[i]];
-                bytes32 hash = _hashPair(portfolio.inputToken, assetList[i].token);
-                assetPoolKeys[i] = _pairToPoolKey[hash];
-            }
-        } else {
-            Portfolio memory portfolio = portfolios[portfolioId];
-            address[] memory assetAddresses = portfolio.assetAddresses;
-            assetList = new Asset[](assetAddresses.length);
-            assetPoolKeys = new PoolKey[](assetAddresses.length);
+    //         for (uint8 i = 0; i < assetAddresses.length; i++) {
+    //             assetList[i] = managedPortfolioCurrentAssets[portfolioId][assetAddresses[i]];
+    //             bytes32 hash = _hashPair(portfolio.inputToken, assetList[i].token);
+    //             assetPoolKeys[i] = _pairToPoolKey[hash];
+    //         }
+    //     } else {
+    //         Portfolio memory portfolio = portfolios[portfolioId];
+    //         address[] memory assetAddresses = portfolio.assetAddresses;
+    //         assetList = new Asset[](assetAddresses.length);
+    //         assetPoolKeys = new PoolKey[](assetAddresses.length);
 
-            for (uint8 i = 0; i < assetAddresses.length; i++) {
-                assetList[i] = portfolioAssets[portfolioId][assetAddresses[i]];
-                bytes32 hash = _hashPair(portfolio.inputToken, assetList[i].token);
-                assetPoolKeys[i] = _pairToPoolKey[hash];
-            }
-        }
+    //         for (uint8 i = 0; i < assetAddresses.length; i++) {
+    //             assetList[i] = portfolioAssets[portfolioId][assetAddresses[i]];
+    //             bytes32 hash = _hashPair(portfolio.inputToken, assetList[i].token);
+    //             assetPoolKeys[i] = _pairToPoolKey[hash];
+    //         }
+    //     }
 
-        uint256 navSqrtPriceX96 = 0;
-        for (uint8 i = 0; i < assetList.length; i++) {
-            uint256 amount = assetList[i].amountHeld * 10 ** assetList[i].decimals;
-            (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
-            navSqrtPriceX96 += (amount * sqrtPriceX96);
-        }
-        return navSqrtPriceX96;
-    }
-    // NAV TEST
-    //
-    //
+    //     for (uint8 i = 0; i < assetList.length; i++) {
+    //         uint256 amount = _normalizeTokenAmount(assetList[i].amountHeld, assetList[i].decimals);
+    //         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
+    //         navSqrtPriceX96 += (amount * sqrtPriceX96);
+    //     }
+    //     return navSqrtPriceX96;
+    // }
 
-    function nav(uint256 portfolioId, bool isManaged) public returns (uint256) {
+    function nav(uint256 portfolioId, bool isManaged) public returns (uint256 navSqrtPriceX96) {
         Asset[] memory assetList;
         PoolKey[] memory assetPoolKeys;
         if (isManaged) {
@@ -470,7 +468,7 @@ contract PortfolioManager is BaseHook {
     function _nav(Asset[] memory assetList, PoolKey[] memory assetPoolKeys) external view selfOnly returns (uint256) {
         uint256 navSqrtPriceX96;
         for (uint8 i = 0; i < assetList.length; i++) {
-            uint256 amount = assetList[i].amountHeld / 10 ** assetList[i].decimals;
+            uint256 amount = _normalizeTokenAmount(assetList[i].amountHeld, assetList[i].decimals);
             // (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) = manager.getSlot0(key.toId());
             (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
             navSqrtPriceX96 += (amount * sqrtPriceX96);
@@ -526,14 +524,45 @@ contract PortfolioManager is BaseHook {
         return ++_portfolioId;
     }
 
-    function _fee(uint256 portfolioId) internal view returns (uint24) {
-        // discount fees for swaps pushing portfolio token price closer to NAV
+    function _fee(uint256 portfolioId, PoolKey calldata key, IPoolManager.SwapParams calldata swapParams)
+        internal
+        validateId(portfolioId)
+        returns (uint24)
+    {
+        bool isManaged = idToIsManaged[portfolioId];
+        uint256 navSqrtPriceX96 = nav(portfolioId, isManaged);
+        uint256 sqrtPriceX96;
+        uint256 totalSupply;
+        address portfolioToken;
+        bool isBuy;
 
-        // if pt price < nav/shares --> discount buys
-        // if pt price > nav/shares --> discount sells
+        if (isManaged) {
+            ManagedPortfolio memory mp = managedPortfolios[portfolioId];
+            (sqrtPriceX96,,,) = poolManager.getSlot0(mp.poolId);
+            totalSupply = mp.portfolioToken.totalSupply();
+            portfolioToken = address(mp.portfolioToken);
+        } else {
+            Portfolio memory p = portfolios[portfolioId];
+            (sqrtPriceX96,,,) = poolManager.getSlot0(p.poolId);
+            totalSupply = p.portfolioToken.totalSupply();
+            portfolioToken = address(p.portfolioToken);
+        }
 
-        // compare [nav / totalshares] to tick-->price
-        return 1;
+        if (address(Currency.unwrap(key.currency0)) == address(portfolioToken)) {
+            isBuy = !swapParams.zeroForOne;
+        } else {
+            isBuy = swapParams.zeroForOne;
+        }
+
+        // Discount fees for swaps pushing portfolio token price closer to NAV
+        if (
+            (sqrtPriceX96 < (navSqrtPriceX96 / totalSupply) && isBuy)
+                || (sqrtPriceX96 > (navSqrtPriceX96 / totalSupply) && !isBuy)
+        ) {
+            return DISCOUNTED_SWAP_FEE;
+        } else {
+            return DEFAULT_SWAP_FEE;
+        }
     }
 
     function _hash(Asset[] memory assetList, address inputToken, uint8 rebalanceFrequency)
@@ -561,6 +590,19 @@ contract PortfolioManager is BaseHook {
         }
 
         return keccak256(abi.encode(assetList, inputToken, rebalanceFrequency));
+    }
+
+    // note: leads to truncation if tokenDecimals > 18
+    // https://x.com/CharlesWangP/status/1742512078378725658
+    function _normalizeTokenAmount(uint256 tokenAmount, uint256 tokenDecimals) internal pure returns (uint256) {
+        uint256 defaultDecimals = 18;
+        if (tokenDecimals > defaultDecimals) {
+            return tokenAmount / (10 ** (tokenDecimals - defaultDecimals));
+        } else if (tokenDecimals < defaultDecimals) {
+            return tokenAmount * (10 ** (defaultDecimals - tokenDecimals));
+        } else {
+            return tokenAmount;
+        }
     }
 
     /*
