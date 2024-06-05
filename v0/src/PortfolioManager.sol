@@ -362,6 +362,7 @@ contract PortfolioManager is BaseHook {
             }
             if (block.timestamp < mp.rebalancedAt + (mp.rebalanceFrequency * 1 days)) {
                 didRebalance = false;
+                return didRebalance;
             }
             // populate unlockCallback
         } else {
@@ -371,6 +372,7 @@ contract PortfolioManager is BaseHook {
             }
             if (block.timestamp < p.rebalancedAt + (p.rebalanceFrequency * 1 days)) {
                 didRebalance = false;
+                return didRebalance;
             }
             // populate unlockCallback
         }
@@ -380,7 +382,9 @@ contract PortfolioManager is BaseHook {
         poolManager.unlock(abi.encodeCall(this._rebalance, (isManaged, msg.sender)));
         didRebalance = true;
         return didRebalance;
+    }
 
+    function _rebalance(bool isManaged, address sender) external selfOnly {
         /*
         struct CallbackData {
             address sender;
@@ -395,43 +399,6 @@ contract PortfolioManager is BaseHook {
         }
         */
     }
-
-    function _rebalance(bool isManaged, address sender) external selfOnly {}
-
-    // function navInline(uint256 portfolioId, bool isManaged) public view returns (uint256 navSqrtPriceX96) {
-    //     Asset[] memory assetList;
-    //     PoolKey[] memory assetPoolKeys;
-    //     if (isManaged) {
-    //         ManagedPortfolio memory portfolio = managedPortfolios[portfolioId];
-    //         address[] memory assetAddresses = portfolio.currentAssetAddresses;
-    //         assetList = new Asset[](assetAddresses.length);
-    //         assetPoolKeys = new PoolKey[](assetAddresses.length);
-
-    //         for (uint8 i = 0; i < assetAddresses.length; i++) {
-    //             assetList[i] = managedPortfolioCurrentAssets[portfolioId][assetAddresses[i]];
-    //             bytes32 hash = _hashPair(portfolio.inputToken, assetList[i].token);
-    //             assetPoolKeys[i] = _pairToPoolKey[hash];
-    //         }
-    //     } else {
-    //         Portfolio memory portfolio = portfolios[portfolioId];
-    //         address[] memory assetAddresses = portfolio.assetAddresses;
-    //         assetList = new Asset[](assetAddresses.length);
-    //         assetPoolKeys = new PoolKey[](assetAddresses.length);
-
-    //         for (uint8 i = 0; i < assetAddresses.length; i++) {
-    //             assetList[i] = portfolioAssets[portfolioId][assetAddresses[i]];
-    //             bytes32 hash = _hashPair(portfolio.inputToken, assetList[i].token);
-    //             assetPoolKeys[i] = _pairToPoolKey[hash];
-    //         }
-    //     }
-
-    //     for (uint8 i = 0; i < assetList.length; i++) {
-    //         uint256 amount = _normalizeTokenAmount(assetList[i].amountHeld, assetList[i].decimals);
-    //         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
-    //         navSqrtPriceX96 += (amount * sqrtPriceX96);
-    //     }
-    //     return navSqrtPriceX96;
-    // }
 
     function nav(uint256 portfolioId, bool isManaged) public returns (uint256 navSqrtPriceX96) {
         Asset[] memory assetList;
@@ -475,6 +442,42 @@ contract PortfolioManager is BaseHook {
         }
         return navSqrtPriceX96;
     }
+    //
+    // Inline instead of unlock
+    // function nav(uint256 portfolioId, bool isManaged) public view returns (uint256 navSqrtPriceX96) {
+    //     Asset[] memory assetList;
+    //     PoolKey[] memory assetPoolKeys;
+    //     if (isManaged) {
+    //         ManagedPortfolio memory portfolio = managedPortfolios[portfolioId];
+    //         address[] memory assetAddresses = portfolio.currentAssetAddresses;
+    //         assetList = new Asset[](assetAddresses.length);
+    //         assetPoolKeys = new PoolKey[](assetAddresses.length);
+
+    //         for (uint8 i = 0; i < assetAddresses.length; i++) {
+    //             assetList[i] = managedPortfolioCurrentAssets[portfolioId][assetAddresses[i]];
+    //             bytes32 hash = _hashPair(portfolio.inputToken, assetList[i].token);
+    //             assetPoolKeys[i] = _pairToPoolKey[hash];
+    //         }
+    //     } else {
+    //         Portfolio memory portfolio = portfolios[portfolioId];
+    //         address[] memory assetAddresses = portfolio.assetAddresses;
+    //         assetList = new Asset[](assetAddresses.length);
+    //         assetPoolKeys = new PoolKey[](assetAddresses.length);
+
+    //         for (uint8 i = 0; i < assetAddresses.length; i++) {
+    //             assetList[i] = portfolioAssets[portfolioId][assetAddresses[i]];
+    //             bytes32 hash = _hashPair(portfolio.inputToken, assetList[i].token);
+    //             assetPoolKeys[i] = _pairToPoolKey[hash];
+    //         }
+    //     }
+
+    //     for (uint8 i = 0; i < assetList.length; i++) {
+    //         uint256 amount = _normalizeTokenAmount(assetList[i].amountHeld, assetList[i].decimals);
+    //         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
+    //         navSqrtPriceX96 += (amount * sqrtPriceX96);
+    //     }
+    //     return navSqrtPriceX96;
+    // }
 
     /*
         Getters
