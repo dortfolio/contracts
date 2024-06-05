@@ -16,35 +16,6 @@ import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
 import {Strings} from "openzeppelin/utils/Strings.sol";
 import {PortfolioToken, ERC20} from "./PortfolioToken.sol";
 
-struct Asset {
-    address token; // address(0) = eth
-    uint8 decimals;
-    uint8 targetWeight;
-    uint256 amountHeld;
-}
-
-struct Portfolio {
-    address inputToken;
-    PortfolioToken portfolioToken;
-    PoolId poolId;
-    address[] assetAddresses;
-    uint8 rebalanceFrequency; // n days
-    uint256 rebalancedAt; // timestamp
-}
-
-struct ManagedPortfolio {
-    address inputToken;
-    PortfolioToken portfolioToken;
-    address manager;
-    PoolId poolId;
-    address[] currentAssetAddresses;
-    address[] targetAssetAddresses;
-    uint8 managementFeeBasisPoints;
-    uint8 rebalanceFrequency; // n days
-    uint256 rebalancedAt; // timestamp
-    uint256 updatedAt; // timestamp
-}
-
 contract PortfolioManager is BaseHook {
     using LPFeeLibrary for uint24;
     using PoolIdLibrary for PoolKey;
@@ -56,6 +27,35 @@ contract PortfolioManager is BaseHook {
     uint8 public constant MANGED_PORTFOLIO_MANAGEMENT_FEE = 10;
     uint160 public constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
     bytes constant ZERO_BYTES = new bytes(0);
+
+    struct Asset {
+        address token; // address(0) = eth
+        uint8 decimals;
+        uint24 targetWeight;
+        uint256 amountHeld;
+    }
+
+    struct Portfolio {
+        address inputToken;
+        PortfolioToken portfolioToken;
+        PoolId poolId;
+        address[] assetAddresses;
+        uint8 rebalanceFrequency; // n days
+        uint256 rebalancedAt; // timestamp
+    }
+
+    struct ManagedPortfolio {
+        address inputToken;
+        PortfolioToken portfolioToken;
+        address manager;
+        PoolId poolId;
+        address[] currentAssetAddresses;
+        address[] targetAssetAddresses;
+        uint8 managementFeeBasisPoints;
+        uint8 rebalanceFrequency; // n days
+        uint256 rebalancedAt; // timestamp
+        uint256 updatedAt; // timestamp
+    }
 
     mapping(PoolId poolId => uint256 id) public poolIdToId;
     mapping(uint256 id => bool isManaged) public idToIsManaged;
@@ -81,7 +81,6 @@ contract PortfolioManager is BaseHook {
     error InvalidPortfolioId();
     error InvalidPortfolioInputToken();
     error InvalidPortfolioManager();
-    error InvalidPortfolioRebalanceTimestamp();
     error InvalidPortfolioUpdate();
     error MustUseDynamicFee();
 
@@ -248,7 +247,10 @@ contract PortfolioManager is BaseHook {
         rebalance(portfolioId);
     }
 
-    function create(Asset[] calldata assetList, address inputToken, uint8 rebalanceFrequency, bool isManaged) public {
+    function create(Asset[] calldata assetList, address inputToken, uint8 rebalanceFrequency, bool isManaged)
+        public
+        returns (uint256)
+    {
         // validate assetList
         bytes32 hash = _hash(assetList, inputToken, rebalanceFrequency);
 
@@ -301,6 +303,7 @@ contract PortfolioManager is BaseHook {
         }
 
         rebalance(portfolioId);
+        return portfolioId;
     }
 
     function update(uint256 portfolioId, Asset[] calldata assetList, uint8 rebalanceFrequency)
@@ -355,7 +358,7 @@ contract PortfolioManager is BaseHook {
                 revert InvalidPortfolioId();
             }
             if (block.timestamp < mp.rebalancedAt + (mp.rebalanceFrequency * 1 days)) {
-                revert InvalidPortfolioRebalanceTimestamp();
+                return;
             }
             // populate unlockCallback
         } else {
@@ -364,7 +367,7 @@ contract PortfolioManager is BaseHook {
                 revert InvalidPortfolioId();
             }
             if (block.timestamp < p.rebalancedAt + (p.rebalanceFrequency * 1 days)) {
-                revert InvalidPortfolioRebalanceTimestamp();
+                return;
             }
             // populate unlockCallback
         }
@@ -420,9 +423,9 @@ contract PortfolioManager is BaseHook {
             }
         }
 
-        uint256 navSqrtPriceX96;
+        uint256 navSqrtPriceX96 = 0;
         for (uint8 i = 0; i < assetList.length; i++) {
-            uint256 amount = assetList[i].amountHeld * 10 ^ assetList[i].decimals;
+            uint256 amount = assetList[i].amountHeld * 10 ** assetList[i].decimals;
             (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
             navSqrtPriceX96 += (amount * sqrtPriceX96);
         }
@@ -467,7 +470,7 @@ contract PortfolioManager is BaseHook {
     function _nav(Asset[] memory assetList, PoolKey[] memory assetPoolKeys) external view selfOnly returns (uint256) {
         uint256 navSqrtPriceX96;
         for (uint8 i = 0; i < assetList.length; i++) {
-            uint256 amount = assetList[i].amountHeld * 10 ^ assetList[i].decimals;
+            uint256 amount = assetList[i].amountHeld / 10 ** assetList[i].decimals;
             // (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) = manager.getSlot0(key.toId());
             (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
             navSqrtPriceX96 += (amount * sqrtPriceX96);
@@ -545,7 +548,7 @@ contract PortfolioManager is BaseHook {
         uint256 totalWeight = assetList[0].targetWeight;
 
         for (uint256 i = 1; i < assetList.length; i++) {
-            // addresses must be sorted and unique
+            // addresses must be sorted to check for and ensure uniqueness
             if (assetList[i - 1].token >= assetList[i].token) {
                 revert InvalidAssetList();
             }
