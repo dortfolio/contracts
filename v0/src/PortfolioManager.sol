@@ -7,6 +7,7 @@ import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {PoolId, PoolIdLibrary, PoolKey} from "v4-core/types/PoolId.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 
+import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
 import {PoolClaimsTest} from "v4-core/test/PoolClaimsTest.sol";
 import {PoolModifyLiquidityTest} from "v4-core/test/PoolModifyLiquidityTest.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
@@ -18,6 +19,7 @@ import {PortfolioToken, ERC20} from "./PortfolioToken.sol";
 import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 
 contract PortfolioManager is BaseHook {
+    using CurrencySettler for Currency;
     using LPFeeLibrary for uint24;
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -60,6 +62,12 @@ contract PortfolioManager is BaseHook {
         uint256 updatedAt; // timestamp
     }
 
+    struct Swap {
+        PoolKey poolKey;
+        IPoolManager.SwapParams swapParams;
+        PoolSwapTest.TestSettings testSettings;
+    }
+
     mapping(PoolId poolId => uint256 id) public poolIdToId;
     mapping(uint256 id => bool isManaged) public idToIsManaged;
 
@@ -81,6 +89,7 @@ contract PortfolioManager is BaseHook {
 
     error InvalidAssetList();
     error InvalidAssetWeightSum();
+    error InvalidBalanceDelta();
     error InvalidMintSpenderAddress();
     error InvalidPortfolioId();
     error InvalidPortfolioInputToken();
@@ -385,6 +394,26 @@ contract PortfolioManager is BaseHook {
             bool settleUsingBurn;
         }
         */
+        // if (amount0 < 0) {
+        //     swap.poolKey.currency0.settle(
+        //         poolManager, portfolioManager, uint128(-amount0), swap.testSettings.settleUsingBurn
+        //     );
+        // }
+        // if (amount1 < 0) {
+        //     swap.poolKey.currency1.settle(
+        //         poolManager, portfolioManager, uint128(-amount1), swap.testSettings.settleUsingBurn
+        //     );
+        // }
+        // if (amount0 > 0) {
+        //     swap.poolKey.currency0.take(
+        //         poolManager, portfolioManager, uint128(amount0), swap.testSettings.takeClaims
+        //     );
+        // }
+        // if (amount1 > 0) {
+        //     swap.poolKey.currency1.take(
+        //         poolManager, portfolioManager, uint128(amount1), swap.testSettings.takeClaims
+        //     );
+        // }
     }
 
     function nav(uint256 portfolioId, bool isManaged) public returns (uint256 navSqrtX96) {
@@ -502,6 +531,7 @@ contract PortfolioManager is BaseHook {
         }
         inputToken.permit(owner, spender, inputTokenAmount, deadline, v, r, s);
         inputToken.transferFrom(owner, spender, inputTokenAmount);
+        // issue claims for token amount received
 
         bool isManaged = idToIsManaged[portfolioId];
 
@@ -520,32 +550,86 @@ contract PortfolioManager is BaseHook {
 
     function allocate(uint256 portfolioId, uint256 inputTokenAmount, bool isManaged) internal {
         address[] memory assetAddresses;
+        address inputToken;
+
         if (isManaged) {
             assetAddresses = managedPortfolios[portfolioId].currentAssetAddresses;
+            inputToken = managedPortfolios[portfolioId].inputToken;
         } else {
             assetAddresses = portfolios[portfolioId].assetAddresses;
+            inputToken = portfolios[portfolioId].inputToken;
         }
 
-        // Asset[] memory assetList = new Asset[](assetAddresses.length);
-        // for (uint8 i = 0; i < assetAddresses.length; i++) {
-        //     if (isManaged) {
-        //         assetList[i] = managedPortfolioCurrentAssets[portfolioId][assetAddresses[i]];
-        //     } else {
-        //         assetList[i] = portfolioAssets[portfolioId][assetAddresses[i]];
-        //     }
-        // }
+        Swap[] memory swapList = new Swap[](assetAddresses.length);
 
-        // // Asset[] memory updatedAssetList = bytes32(poolManager.unlock(abi.encodeCall(this._allocate, (portfolioId, amount, assetList, isManaged))));
-        // // Asset[] memory updatedAssetList =
-        // abi.decode(
-        //     poolManager.unlock(abi.encodeCall(this._allocate, (portfolioId, amount, assetList, isManaged))), (Asset[])
-        // );
+        for (uint8 i = 0; i < assetAddresses.length; i++) {
+            Asset memory asset;
+            if (isManaged) {
+                asset = managedPortfolioCurrentAssets[portfolioId][assetAddresses[i]];
+            } else {
+                asset = portfolioAssets[portfolioId][assetAddresses[i]];
+            }
+
+            swapList[i] = Swap({
+                poolKey: _pairToPoolKey[_hashPair(inputToken, asset.token)],
+                swapParams: IPoolManager.SwapParams({
+                    zeroForOne: inputToken < asset.token,
+                    amountSpecified: -1 * int256(inputTokenAmount),
+                    sqrtPriceLimitX96: 1
+                }),
+                testSettings: PoolSwapTest.TestSettings({takeClaims: true, settleUsingBurn: true})
+            });
+        }
+
+        uint256[] memory outputTokenAmounts =
+            abi.decode(poolManager.unlock(abi.encodeCall(this._allocate, (address(this), swapList))), (uint256[]));
+
+        for (uint8 i = 0; i < assetAddresses.length; i++) {
+            Asset storage asset;
+            if (isManaged) {
+                asset = managedPortfolioCurrentAssets[portfolioId][assetAddresses[i]];
+            } else {
+                asset = portfolioAssets[portfolioId][assetAddresses[i]];
+            }
+            asset.amountHeld += outputTokenAmounts[i];
+        }
     }
 
-    function _allocate(uint256 portfolioId, uint256 inputTokenAmount, Asset[] calldata assetList, bool isManaged)
+    function _allocate(address portfolioManager, Swap[] calldata swapList)
         external
         selfOnly
-    {}
+        returns (uint256[] memory)
+    {
+        uint256[] memory outputTokenAmounts = new uint256[](swapList.length);
+
+        for (uint8 i = 0; i < swapList.length; i++) {
+            Swap memory swap = swapList[i];
+
+            // Use poolManager.swap instead of swapRouter.swap because the latter calls unlock
+            BalanceDelta balanceDelta = poolManager.swap(swap.poolKey, swap.swapParams, ZERO_BYTES);
+            int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
+            int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
+
+            if (swap.swapParams.zeroForOne) {
+                swap.poolKey.currency0.settle(
+                    poolManager, portfolioManager, uint128(-amount0), swap.testSettings.settleUsingBurn
+                );
+                swap.poolKey.currency1.take(
+                    poolManager, portfolioManager, uint128(amount1), swap.testSettings.takeClaims
+                );
+                outputTokenAmounts[i] = uint128(amount1);
+            } else {
+                swap.poolKey.currency1.settle(
+                    poolManager, portfolioManager, uint128(-amount1), swap.testSettings.settleUsingBurn
+                );
+                swap.poolKey.currency0.take(
+                    poolManager, portfolioManager, uint128(amount0), swap.testSettings.takeClaims
+                );
+                outputTokenAmounts[i] = uint128(amount0);
+            }
+        }
+        return outputTokenAmounts;
+    }
 
     function burn(uint256 portfolioId, uint256 portfolioTokenAmount) public validateId(portfolioId) {
         // revert if no EIP-2612 permit to spend token amount
