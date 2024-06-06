@@ -121,6 +121,27 @@ contract PortfolioManagerTest is Test, Deployers {
         assertEq(nav, 0);
     }
 
+    // function testPermit() public {
+    //     uint256 privateKey = 0xBEEF;
+    //     address owner = vm.addr(privateKey);
+
+    //     (uint8 v, bytes32 r, bytes32 s) = vm.sign(
+    //         privateKey,
+    //         keccak256(
+    //             abi.encodePacked(
+    //                 "\x19\x01",
+    //                 token.DOMAIN_SEPARATOR(),
+    //                 keccak256(abi.encode(PERMIT_TYPEHASH, owner, address(0xCAFE), 1e18, 0, block.timestamp))
+    //             )
+    //         )
+    //     );
+
+    //     token.permit(owner, address(0xCAFE), 1e18, block.timestamp, v, r, s);
+
+    //     assertEq(token.allowance(owner, address(0xCAFE)), 1e18);
+    //     assertEq(token.nonces(owner), 1);
+    // }
+
     function test_addPair() public {
         (Currency currency0, Currency currency1) = deployMintAndApprove2Currencies();
         (PoolKey memory poolKey,) =
