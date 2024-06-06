@@ -349,42 +349,181 @@ contract PortfolioManager is BaseHook {
         rebalance(portfolioId);
     }
 
-    function rebalance(uint256 portfolioId) public returns (bool didRebalance) {
-        if (portfolioId > _portfolioId) {
-            revert InvalidPortfolioId();
-        }
-
+    function rebalance(uint256 portfolioId) public validateId(portfolioId) returns (bool didRebalance) {
         bool isManaged = idToIsManaged[portfolioId];
-        if (isManaged) {
-            ManagedPortfolio storage mp = managedPortfolios[portfolioId];
-            if (mp.currentAssetAddresses.length == 0) {
-                revert InvalidPortfolioId();
-            }
-            if (block.timestamp < mp.rebalancedAt + (mp.rebalanceFrequency * 1 days)) {
-                didRebalance = false;
-                return didRebalance;
-            }
-            // populate unlockCallback
-        } else {
-            Portfolio storage p = portfolios[portfolioId];
-            if (p.assetAddresses.length == 0) {
-                revert InvalidPortfolioId();
-            }
-            if (block.timestamp < p.rebalancedAt + (p.rebalanceFrequency * 1 days)) {
-                didRebalance = false;
-                return didRebalance;
-            }
-            // populate unlockCallback
-        }
 
-        // https://docs.uniswap.org/contracts/v4/concepts/lock-mechanism
-        // lock was renamed to unlock --> https://github.com/Uniswap/v4-core/pull/508
-        poolManager.unlock(abi.encodeCall(this._rebalance, (isManaged, msg.sender)));
-        didRebalance = true;
-        return didRebalance;
+        if (isManaged) {
+            didRebalance = _rebalanceManagedPortfolio(portfolioId);
+        } else {
+            didRebalance = _rebalanceAutomatedPortfolio(portfolioId);
+        }
     }
 
-    function _rebalance(bool isManaged, address sender) external selfOnly {
+    function _rebalanceAutomatedPortfolio(uint256 portfolioId) internal returns (bool) {
+        Portfolio storage p = portfolios[portfolioId];
+
+        if (block.timestamp < p.rebalancedAt + (p.rebalanceFrequency * 1 days)) {
+            return false;
+        }
+
+        Swap[] memory swapList = new Swap[](p.assetAddresses.length);
+        uint24[] memory weightList = new uint24[](p.assetAddresses.length);
+
+        for (uint8 i = 0; i < p.assetAddresses.length; i++) {
+            Asset memory asset = portfolioAssets[portfolioId][p.assetAddresses[i]];
+
+            swapList[i] = Swap({
+                poolKey: _pairToPoolKey[_hashPair(p.inputToken, asset.token)],
+                swapParams: IPoolManager.SwapParams({
+                    zeroForOne: asset.token < p.inputToken,
+                    amountSpecified: -1 * int256(asset.amountHeld),
+                    sqrtPriceLimitX96: asset.token < p.inputToken ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+                }),
+                testSettings: PoolSwapTest.TestSettings({takeClaims: true, settleUsingBurn: true})
+            });
+
+            weightList[i] = asset.targetWeight;
+        }
+        uint256[] memory assetAmounts = abi.decode(
+            poolManager.unlock(
+                abi.encodeCall(this._rebalanceAutomatedPortfolioUnlockCallback, (address(this), swapList, weightList))
+            ),
+            (uint256[])
+        );
+
+        for (uint8 i = 0; i < p.assetAddresses.length; i++) {
+            Asset storage asset = portfolioAssets[portfolioId][p.assetAddresses[i]];
+            asset.amountHeld = assetAmounts[i];
+        }
+
+        p.rebalancedAt = block.timestamp;
+        return true;
+    }
+
+    function _rebalanceAutomatedPortfolioUnlockCallback(
+        address portfolioManager,
+        Swap[] calldata swapList,
+        uint24[] memory weightList
+    ) external selfOnly returns (uint256[] memory) {
+        uint256 inputTokenTotal;
+
+        for (uint8 i = 0; i < swapList.length; i++) {
+            Swap memory swap = swapList[i];
+
+            // Use poolManager.swap instead of swapRouter.swap because the latter calls unlock
+            BalanceDelta balanceDelta = poolManager.swap(swap.poolKey, swap.swapParams, ZERO_BYTES);
+            int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
+            int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
+
+            // asset for inputToken
+            if (swap.swapParams.zeroForOne) {
+                swap.poolKey.currency0.settle(
+                    poolManager, portfolioManager, uint128(-amount0), swap.testSettings.settleUsingBurn
+                );
+                swap.poolKey.currency1.take(
+                    poolManager, portfolioManager, uint128(amount1), swap.testSettings.takeClaims
+                );
+                inputTokenTotal += uint128(amount1);
+            } else {
+                swap.poolKey.currency1.settle(
+                    poolManager, portfolioManager, uint128(-amount1), swap.testSettings.settleUsingBurn
+                );
+                swap.poolKey.currency0.take(
+                    poolManager, portfolioManager, uint128(amount0), swap.testSettings.takeClaims
+                );
+
+                inputTokenTotal += uint128(amount0);
+            }
+        }
+
+        uint256[] memory assetAmounts = new uint256[](swapList.length);
+
+        for (uint8 i = 0; i < swapList.length; i++) {
+            Swap memory lastSwap = swapList[i];
+
+            // flip to inputToken for asset
+            bool zeroForOne = !lastSwap.swapParams.zeroForOne;
+            IPoolManager.SwapParams memory swapParams = IPoolManager.SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -1 * int256(inputTokenTotal * (weightList[i] / ASSET_WEIGHT_SUM)),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            });
+
+            BalanceDelta balanceDelta = poolManager.swap(lastSwap.poolKey, swapParams, ZERO_BYTES);
+            int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
+            int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
+
+            // inputToken for asset
+            if (swapParams.zeroForOne) {
+                lastSwap.poolKey.currency0.settle(
+                    poolManager, portfolioManager, uint128(-amount0), lastSwap.testSettings.settleUsingBurn
+                );
+                lastSwap.poolKey.currency1.take(
+                    poolManager, portfolioManager, uint128(amount1), lastSwap.testSettings.takeClaims
+                );
+                assetAmounts[i] = uint128(amount1);
+            } else {
+                lastSwap.poolKey.currency1.settle(
+                    poolManager, portfolioManager, uint128(-amount1), lastSwap.testSettings.settleUsingBurn
+                );
+                lastSwap.poolKey.currency0.take(
+                    poolManager, portfolioManager, uint128(amount0), lastSwap.testSettings.takeClaims
+                );
+                assetAmounts[i] = uint128(amount0);
+            }
+        }
+        return assetAmounts;
+    }
+
+    function _rebalanceManagedPortfolio(uint256 portfolioId) internal returns (bool) {
+        ManagedPortfolio storage mp = managedPortfolios[portfolioId];
+
+        if (block.timestamp < mp.rebalancedAt + (mp.rebalanceFrequency * 1 days)) {
+            return false;
+        }
+
+        Swap[] memory deallocateSwapList = new Swap[](mp.currentAssetAddresses.length);
+
+        for (uint8 i = 0; i < mp.currentAssetAddresses.length; i++) {
+            Asset memory asset = managedPortfolioCurrentAssets[portfolioId][mp.currentAssetAddresses[i]];
+
+            deallocateSwapList[i] = Swap({
+                poolKey: _pairToPoolKey[_hashPair(mp.inputToken, asset.token)],
+                swapParams: IPoolManager.SwapParams({
+                    zeroForOne: asset.token < mp.inputToken,
+                    amountSpecified: -1 * int256(asset.amountHeld),
+                    sqrtPriceLimitX96: asset.token < mp.inputToken ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+                }),
+                testSettings: PoolSwapTest.TestSettings({takeClaims: true, settleUsingBurn: true})
+            });
+        }
+
+        Swap[] memory allocateSwapList = new Swap[](mp.targetAssetAddresses.length);
+        uint24[] memory allocateWeightList = new uint24[](mp.targetAssetAddresses.length);
+
+        for (uint8 i = 0; i < mp.targetAssetAddresses.length; i++) {
+            Asset memory asset = managedPortfolioTargetAssets[portfolioId][mp.targetAssetAddresses[i]];
+
+            allocateSwapList[i] = Swap({
+                poolKey: _pairToPoolKey[_hashPair(mp.inputToken, asset.token)],
+                swapParams: IPoolManager.SwapParams({
+                    zeroForOne: mp.inputToken < asset.token,
+                    amountSpecified: 0, // set during unlock
+                    sqrtPriceLimitX96: mp.inputToken < asset.token ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+                }),
+                testSettings: PoolSwapTest.TestSettings({takeClaims: true, settleUsingBurn: true})
+            });
+
+            allocateWeightList[i] = asset.targetWeight;
+        }
+    }
+
+    function _rebalanceManagedPortfolioUnlockCallback(
+        address portfolioManager,
+        Swap[] calldata deallocateSwapList,
+        Swap[] calldata allocateSwapList,
+        uint24[] memory allocateWeightList
+    ) external selfOnly returns (uint256[] memory) {
         /*
         struct CallbackData {
             address sender;
