@@ -15,6 +15,7 @@ import {BaseHook, Hooks, IHooks, IPoolManager} from "v4-periphery/BaseHook.sol";
 import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
 import {Strings} from "openzeppelin/utils/Strings.sol";
 import {PortfolioToken, ERC20} from "./PortfolioToken.sol";
+import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 
 contract PortfolioManager is BaseHook {
     using LPFeeLibrary for uint24;
@@ -80,6 +81,7 @@ contract PortfolioManager is BaseHook {
 
     error InvalidAssetList();
     error InvalidAssetWeightSum();
+    error InvalidMintSpenderAddress();
     error InvalidPortfolioId();
     error InvalidPortfolioInputToken();
     error InvalidPortfolioManager();
@@ -235,21 +237,6 @@ contract PortfolioManager is BaseHook {
         Portfolio Management 
     */
 
-    function mint(uint256 portfolioId, uint256 inputTokenAmount) public payable validateId(portfolioId) {
-        // portfolio buys tokens using the deposited amount
-        // portfolio transfers erc20 portfolio tokens to msg.sender
-        // revert if no EIP-2612 permit to spend token amount
-        rebalance(portfolioId);
-    }
-
-    function burn(uint256 portfolioId, uint256 portfolioTokenAmount) public validateId(portfolioId) {
-        // revert if no EIP-2612 permit to spend token amount
-        // portfolio burns specified amount of portfolio tokens
-        // portfolio sells assets for inputToken
-        // portfolio transfers inputToken to msg.sender
-        rebalance(portfolioId);
-    }
-
     function create(Asset[] calldata assetList, address inputToken, uint8 rebalanceFrequency, bool isManaged)
         public
         returns (uint256)
@@ -400,7 +387,7 @@ contract PortfolioManager is BaseHook {
         */
     }
 
-    function nav(uint256 portfolioId, bool isManaged) public returns (uint256 navSqrtPriceX96) {
+    function nav(uint256 portfolioId, bool isManaged) public returns (uint256 navSqrtX96) {
         Asset[] memory assetList;
         PoolKey[] memory assetPoolKeys;
         if (isManaged) {
@@ -429,22 +416,26 @@ contract PortfolioManager is BaseHook {
 
         // https://docs.uniswap.org/contracts/v4/concepts/lock-mechanism
         // lock was renamed to unlock --> https://github.com/Uniswap/v4-core/pull/508
-        return uint256(bytes32(poolManager.unlock(abi.encodeCall(this._nav, (assetList, assetPoolKeys)))));
+        return abi.decode(poolManager.unlock(abi.encodeCall(this._nav, (assetList, assetPoolKeys))), (uint256));
     }
 
     function _nav(Asset[] memory assetList, PoolKey[] memory assetPoolKeys) external view selfOnly returns (uint256) {
-        uint256 navSqrtPriceX96;
+        uint256 navSqrtX96;
         for (uint8 i = 0; i < assetList.length; i++) {
             uint256 amount = _normalizeTokenAmount(assetList[i].amountHeld, assetList[i].decimals);
             // (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) = manager.getSlot0(key.toId());
             (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
-            navSqrtPriceX96 += (amount * sqrtPriceX96);
+            if (address(Currency.unwrap(assetPoolKeys[i].currency0)) == assetList[i].token) {
+                navSqrtX96 += (amount * sqrtPriceX96);
+            } else {
+                navSqrtX96 += (amount / sqrtPriceX96);
+            }
         }
-        return navSqrtPriceX96;
+        return navSqrtX96;
     }
     //
     // Inline instead of unlock
-    // function nav(uint256 portfolioId, bool isManaged) public view returns (uint256 navSqrtPriceX96) {
+    // function nav(uint256 portfolioId, bool isManaged) public view returns (uint256 navSqrtX96) {
     //     Asset[] memory assetList;
     //     PoolKey[] memory assetPoolKeys;
     //     if (isManaged) {
@@ -474,10 +465,95 @@ contract PortfolioManager is BaseHook {
     //     for (uint8 i = 0; i < assetList.length; i++) {
     //         uint256 amount = _normalizeTokenAmount(assetList[i].amountHeld, assetList[i].decimals);
     //         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
-    //         navSqrtPriceX96 += (amount * sqrtPriceX96);
+    //         if (address(Currency.unwrap(assetPoolKeys[i].currency0)) == assetList[i].token) {
+    //             navSqrtX96 += (amount * sqrtPriceX96);
+    //         } else {
+    //             navSqrtX96 += (amount / sqrtPriceX96);
+    //         }
     //     }
-    //     return navSqrtPriceX96;
+    //     return navSqrtX96;
     // }
+
+    /*
+        Portfolio Tokens
+    */
+
+    // ETH
+    function mint(uint256 portfolioId) public payable validateId(portfolioId) {
+        // portfolio buys tokens using the deposited amount
+        // portfolio transfers erc20 portfolio tokens to msg.sender
+        // revert if no EIP-2612 permit to spend token amount
+    }
+
+    // ERC-20
+    function mint(
+        uint256 portfolioId,
+        ERC20 inputToken,
+        address owner,
+        address spender,
+        uint256 inputTokenAmount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public validateId(portfolioId) {
+        if (spender != address(this)) {
+            revert InvalidMintSpenderAddress();
+        }
+        inputToken.permit(owner, spender, inputTokenAmount, deadline, v, r, s);
+        inputToken.transferFrom(owner, spender, inputTokenAmount);
+
+        bool isManaged = idToIsManaged[portfolioId];
+
+        uint256 navSqrtX96 = nav(portfolioId, isManaged);
+        uint256 amountSqrtX96 =
+            FixedPointMathLib.sqrt(_normalizeTokenAmount(inputTokenAmount, inputToken.decimals()) * (2 ** 96));
+        if (isManaged) {
+            managedPortfolios[portfolioId].portfolioToken.mint(owner, amountSqrtX96 / navSqrtX96);
+        } else {
+            portfolios[portfolioId].portfolioToken.mint(owner, amountSqrtX96 / navSqrtX96);
+        }
+
+        allocate(portfolioId, inputTokenAmount, isManaged);
+        rebalance(portfolioId);
+    }
+
+    function allocate(uint256 portfolioId, uint256 inputTokenAmount, bool isManaged) internal {
+        address[] memory assetAddresses;
+        if (isManaged) {
+            assetAddresses = managedPortfolios[portfolioId].currentAssetAddresses;
+        } else {
+            assetAddresses = portfolios[portfolioId].assetAddresses;
+        }
+
+        // Asset[] memory assetList = new Asset[](assetAddresses.length);
+        // for (uint8 i = 0; i < assetAddresses.length; i++) {
+        //     if (isManaged) {
+        //         assetList[i] = managedPortfolioCurrentAssets[portfolioId][assetAddresses[i]];
+        //     } else {
+        //         assetList[i] = portfolioAssets[portfolioId][assetAddresses[i]];
+        //     }
+        // }
+
+        // // Asset[] memory updatedAssetList = bytes32(poolManager.unlock(abi.encodeCall(this._allocate, (portfolioId, amount, assetList, isManaged))));
+        // // Asset[] memory updatedAssetList =
+        // abi.decode(
+        //     poolManager.unlock(abi.encodeCall(this._allocate, (portfolioId, amount, assetList, isManaged))), (Asset[])
+        // );
+    }
+
+    function _allocate(uint256 portfolioId, uint256 inputTokenAmount, Asset[] calldata assetList, bool isManaged)
+        external
+        selfOnly
+    {}
+
+    function burn(uint256 portfolioId, uint256 portfolioTokenAmount) public validateId(portfolioId) {
+        // revert if no EIP-2612 permit to spend token amount
+        // portfolio burns specified amount of portfolio tokens
+        // portfolio sells assets for inputToken
+        // portfolio transfers inputToken to msg.sender
+        rebalance(portfolioId);
+    }
 
     /*
         Getters
@@ -533,7 +609,7 @@ contract PortfolioManager is BaseHook {
         returns (uint24)
     {
         bool isManaged = idToIsManaged[portfolioId];
-        uint256 navSqrtPriceX96 = nav(portfolioId, isManaged);
+        uint256 navSqrtX96 = nav(portfolioId, isManaged);
         uint256 sqrtPriceX96;
         uint256 totalSupply;
         address portfolioToken;
@@ -559,8 +635,8 @@ contract PortfolioManager is BaseHook {
 
         // Discount fees for swaps pushing portfolio token price closer to NAV
         if (
-            (sqrtPriceX96 < (navSqrtPriceX96 / totalSupply) && isBuy)
-                || (sqrtPriceX96 > (navSqrtPriceX96 / totalSupply) && !isBuy)
+            (sqrtPriceX96 < (navSqrtX96 / totalSupply) && isBuy)
+                || (sqrtPriceX96 > (navSqrtX96 / totalSupply) && !isBuy)
         ) {
             return DISCOUNTED_SWAP_FEE;
         } else {
