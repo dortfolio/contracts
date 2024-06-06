@@ -531,7 +531,7 @@ contract PortfolioManager is BaseHook {
         }
         inputToken.permit(owner, spender, inputTokenAmount, deadline, v, r, s);
         inputToken.transferFrom(owner, spender, inputTokenAmount);
-        // issue claims for token amount received
+        claimsRouter.deposit(Currency.wrap(address(inputToken)), address(this), inputTokenAmount);
 
         bool isManaged = idToIsManaged[portfolioId];
 
