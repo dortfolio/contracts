@@ -19,6 +19,7 @@ import {
     PortfolioManager,
     StateLibrary
 } from "../src/PortfolioManager.sol";
+import {HookMiner} from "./utils/HookMiner.sol";
 
 contract PortfolioManagerHarness is PortfolioManager {
     constructor(
@@ -50,18 +51,29 @@ contract PortfolioManagerTest is Test, Deployers {
     IHooks public constant NO_HOOK = IHooks(address(0));
 
     function setUp() public {
-        address hookAddress = address(
-            uint160(
-                Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
-                    | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-            )
+        uint160 flags = uint160(
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+                | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
         );
 
         deployFreshManagerAndRouters();
-        deployCodeTo(
-            "PortfolioManagerHarness", abi.encode(manager, claimsRouter, modifyLiquidityRouter, swapRouter), hookAddress
+
+        // deployCodeTo(
+        //     "PortfolioManagerHarness",
+        //     abi.encode(manager, claimsRouter, modifyLiquidityRouter, swapRouter),
+        //     address(flags)
+        // );
+        // pm = PortfolioManagerHarness(address(flags));
+
+        (address hookAddress, bytes32 salt) = HookMiner.find(
+            address(this),
+            flags,
+            type(PortfolioManagerHarness).creationCode,
+            abi.encode(manager, claimsRouter, modifyLiquidityRouter, swapRouter)
         );
-        pm = PortfolioManagerHarness(hookAddress);
+        pm = new PortfolioManagerHarness{salt: salt}(manager, claimsRouter, modifyLiquidityRouter, swapRouter);
+        require(address(pm) == hookAddress, "PortfolioManager: hook address mismatch");
+
         deployTokensAndPools();
     }
 
@@ -119,6 +131,11 @@ contract PortfolioManagerTest is Test, Deployers {
 
         uint256 nav = pm.nav(id, false);
         assertEq(nav, 0);
+    }
+
+    function test_t() public {
+        console.logUint((1 * 100_000) / 100);
+        // 0.01 * 100_000 = 1000
     }
 
     // function testPermit() public {
