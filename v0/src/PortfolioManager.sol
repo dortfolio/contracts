@@ -32,7 +32,7 @@ contract PortfolioManager is BaseHook {
     uint256 internal constant ASSET_WEIGHT_SUM = 100_000;
     uint24 public constant DEFAULT_SWAP_FEE = 1000;
     uint24 public constant DISCOUNTED_SWAP_FEE = 500;
-    uint8 public constant MANGED_PORTFOLIO_MANAGEMENT_FEE = 10;
+    uint8 public constant MANAGED_PORTFOLIO_MANAGEMENT_FEE = 10;
     uint160 public constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
     bytes constant ZERO_BYTES = new bytes(0);
 
@@ -99,6 +99,7 @@ contract PortfolioManager is BaseHook {
     error InvalidPortfolioInputToken();
     error InvalidPortfolioManager();
     error InvalidPortfolioUpdate();
+    error InvalidManagementFeeTransfer();
     error MustUseDynamicFee();
 
     constructor(
@@ -287,7 +288,7 @@ contract PortfolioManager is BaseHook {
                 poolId: poolId,
                 currentAssetAddresses: assetAddresses,
                 targetAssetAddresses: assetAddresses,
-                managementFeeBasisPoints: MANGED_PORTFOLIO_MANAGEMENT_FEE,
+                managementFeeBasisPoints: MANAGED_PORTFOLIO_MANAGEMENT_FEE,
                 rebalanceFrequency: rebalanceFrequency,
                 rebalancedAt: 0,
                 updatedAt: 0
@@ -445,7 +446,7 @@ contract PortfolioManager is BaseHook {
             bool zeroForOne = !lastSwap.swapParams.zeroForOne;
             IPoolManager.SwapParams memory swapParams = IPoolManager.SwapParams({
                 zeroForOne: zeroForOne,
-                amountSpecified: -1 * int256(inputTokenTotal * (weightList[i] / ASSET_WEIGHT_SUM)),
+                amountSpecified: -1 * int256(inputTokenTotal * weightList[i] / ASSET_WEIGHT_SUM),
                 sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
             });
 
@@ -485,7 +486,7 @@ contract PortfolioManager is BaseHook {
         Swap[] memory deallocateSwapList = new Swap[](mp.currentAssetAddresses.length);
 
         for (uint8 i = 0; i < mp.currentAssetAddresses.length; i++) {
-            Asset memory asset = managedPortfolioCurrentAssets[portfolioId][mp.currentAssetAddresses[i]];
+            Asset storage asset = managedPortfolioCurrentAssets[portfolioId][mp.currentAssetAddresses[i]];
 
             deallocateSwapList[i] = Swap({
                 poolKey: _pairToPoolKey[_hashPair(mp.inputToken, asset.token)],
@@ -496,6 +497,9 @@ contract PortfolioManager is BaseHook {
                 }),
                 testSettings: PoolSwapTest.TestSettings({takeClaims: true, settleUsingBurn: true})
             });
+
+            asset.amountHeld = 0;
+            asset.targetWeight = 0;
         }
 
         Swap[] memory allocateSwapList = new Swap[](mp.targetAssetAddresses.length);
@@ -516,6 +520,35 @@ contract PortfolioManager is BaseHook {
 
             allocateWeightList[i] = asset.targetWeight;
         }
+
+        (uint256[] memory targetAssetAmounts) = abi.decode(
+            poolManager.unlock(
+                abi.encodeCall(
+                    this._rebalanceManagedPortfolioUnlockCallback,
+                    (address(this), deallocateSwapList, allocateSwapList, allocateWeightList)
+                )
+            ),
+            (uint256[])
+        );
+
+        // if (address(mp.inputToken) == address(0)) {
+        //     (bool sent,) = address(mp.manager).call{value: managementFee}("");
+        //     if (!sent) {
+        //         revert InvalidManagementFeeTransfer();
+        //     }
+        // } else {
+        //     ERC20(mp.inputToken).transfer(mp.manager, managementFee);
+        // }
+
+        for (uint8 i = 0; i < mp.targetAssetAddresses.length; i++) {
+            Asset storage asset = managedPortfolioTargetAssets[portfolioId][mp.targetAssetAddresses[i]];
+            asset.amountHeld = targetAssetAmounts[i];
+            managedPortfolioCurrentAssets[portfolioId][mp.targetAssetAddresses[i]] = asset;
+        }
+
+        mp.rebalancedAt = block.timestamp;
+        mp.currentAssetAddresses = mp.targetAssetAddresses;
+        return true;
     }
 
     function _rebalanceManagedPortfolioUnlockCallback(
@@ -524,39 +557,67 @@ contract PortfolioManager is BaseHook {
         Swap[] calldata allocateSwapList,
         uint24[] memory allocateWeightList
     ) external selfOnly returns (uint256[] memory) {
-        /*
-        struct CallbackData {
-            address sender;
-            TestSettings testSettings;
-            PoolKey key;
-            IPoolManager.SwapParams params;
-            bytes hookData;
+        uint256 inputTokenTotal;
+
+        for (uint8 i = 0; i < deallocateSwapList.length; i++) {
+            Swap memory swap = deallocateSwapList[i];
+
+            // Use poolManager.swap instead of swapRouter.swap because the latter calls unlock
+            BalanceDelta balanceDelta = poolManager.swap(swap.poolKey, swap.swapParams, ZERO_BYTES);
+            int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
+            int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
+
+            // asset for inputToken
+            if (swap.swapParams.zeroForOne) {
+                swap.poolKey.currency0.settle(
+                    poolManager, portfolioManager, uint128(-amount0), swap.testSettings.settleUsingBurn
+                );
+                swap.poolKey.currency1.take(
+                    poolManager, portfolioManager, uint128(amount1), swap.testSettings.takeClaims
+                );
+                inputTokenTotal += uint128(amount1);
+            } else {
+                swap.poolKey.currency1.settle(
+                    poolManager, portfolioManager, uint128(-amount1), swap.testSettings.settleUsingBurn
+                );
+                swap.poolKey.currency0.take(
+                    poolManager, portfolioManager, uint128(amount0), swap.testSettings.takeClaims
+                );
+
+                inputTokenTotal += uint128(amount0);
+            }
         }
-        struct TestSettings {
-            bool takeClaims;
-            bool settleUsingBurn;
+
+        uint256[] memory targetAssetAmounts = new uint256[](allocateSwapList.length);
+
+        for (uint8 i = 0; i < allocateSwapList.length; i++) {
+            Swap memory swap = allocateSwapList[i];
+            swap.swapParams.amountSpecified = -1 * int256(inputTokenTotal * allocateWeightList[i] / ASSET_WEIGHT_SUM);
+
+            BalanceDelta balanceDelta = poolManager.swap(swap.poolKey, swap.swapParams, ZERO_BYTES);
+            int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
+            int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
+
+            // inputToken for asset
+            if (swap.swapParams.zeroForOne) {
+                swap.poolKey.currency0.settle(
+                    poolManager, portfolioManager, uint128(-amount0), swap.testSettings.settleUsingBurn
+                );
+                swap.poolKey.currency1.take(
+                    poolManager, portfolioManager, uint128(amount1), swap.testSettings.takeClaims
+                );
+                targetAssetAmounts[i] = uint128(amount1);
+            } else {
+                swap.poolKey.currency1.settle(
+                    poolManager, portfolioManager, uint128(-amount1), swap.testSettings.settleUsingBurn
+                );
+                swap.poolKey.currency0.take(
+                    poolManager, portfolioManager, uint128(amount0), swap.testSettings.takeClaims
+                );
+                targetAssetAmounts[i] = uint128(amount0);
+            }
         }
-        */
-        // if (amount0 < 0) {
-        //     swap.poolKey.currency0.settle(
-        //         poolManager, portfolioManager, uint128(-amount0), swap.testSettings.settleUsingBurn
-        //     );
-        // }
-        // if (amount1 < 0) {
-        //     swap.poolKey.currency1.settle(
-        //         poolManager, portfolioManager, uint128(-amount1), swap.testSettings.settleUsingBurn
-        //     );
-        // }
-        // if (amount0 > 0) {
-        //     swap.poolKey.currency0.take(
-        //         poolManager, portfolioManager, uint128(amount0), swap.testSettings.takeClaims
-        //     );
-        // }
-        // if (amount1 > 0) {
-        //     swap.poolKey.currency1.take(
-        //         poolManager, portfolioManager, uint128(amount1), swap.testSettings.takeClaims
-        //     );
-        // }
+        return targetAssetAmounts;
     }
 
     function nav(uint256 portfolioId, bool isManaged) public returns (uint256 navSqrtX96) {
@@ -806,11 +867,16 @@ contract PortfolioManager is BaseHook {
             portfolios[portfolioId].portfolioToken.burn(msg.sender, portfolioTokenAmount);
         }
 
-        _deallocate(portfolioId, portfolioTokenAmount / portfolioTokenTotalSupply, isManaged);
+        _deallocate(portfolioId, portfolioTokenAmount, portfolioTokenTotalSupply, isManaged);
         rebalance(portfolioId);
     }
 
-    function _deallocate(uint256 portfolioId, uint256 portfolioPercentage, bool isManaged) internal {
+    function _deallocate(
+        uint256 portfolioId,
+        uint256 portfolioTokenAmount,
+        uint256 portfolioTokenTotalSupply,
+        bool isManaged
+    ) internal {
         address[] memory assetAddresses;
         address inputToken;
 
@@ -837,7 +903,10 @@ contract PortfolioManager is BaseHook {
                 swapParams: IPoolManager.SwapParams({
                     zeroForOne: asset.token < inputToken,
                     amountSpecified: -1
-                        * int256(portfolioPercentage * (asset.targetWeight / ASSET_WEIGHT_SUM) * asset.amountHeld),
+                        * int256(
+                            asset.amountHeld * portfolioTokenAmount / portfolioTokenTotalSupply * asset.targetWeight
+                                / ASSET_WEIGHT_SUM
+                        ),
                     sqrtPriceLimitX96: asset.token < inputToken ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
                 }),
                 testSettings: PoolSwapTest.TestSettings({takeClaims: true, settleUsingBurn: true})
