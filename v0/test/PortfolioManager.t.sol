@@ -107,6 +107,9 @@ contract PortfolioManagerTest is Test, Deployers {
         PoolKey memory key;
         PoolId id;
 
+        (key,) = initPoolAndAddLiquidityETH(eth, usdc, NO_HOOK, FEE, SQRT_PRICE_1_2, ZERO_BYTES, 10 ether);
+        pm._addPair(key);
+
         (currency0, currency1) = SortTokens.sort(MockERC20(Currency.unwrap(usdc)), MockERC20(Currency.unwrap(wbtc)));
         (key,) = initPoolAndAddLiquidity(currency0, currency1, NO_HOOK, FEE, SQRT_PRICE_1_1, ZERO_BYTES);
         pm._addPair(key);
@@ -154,6 +157,7 @@ contract PortfolioManagerTest is Test, Deployers {
             SigUtils.Permit({owner: user, spender: address(pm), value: 0.1 ether, nonce: 0, deadline: 1000 days});
         bytes32 digest = sigUtils.getTypedDataHash(permit);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, digest);
+
         pm.mint(id, ERC20(Currency.unwrap(usdc)), user, address(pm), permit.value, permit.deadline, v, r, s);
 
         // vm.prank(address(pm));
