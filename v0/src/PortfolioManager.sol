@@ -717,7 +717,12 @@ contract PortfolioManager is BaseHook {
         bool isManaged = idToIsManaged[portfolioId];
 
         uint256 navSqrtX96 = nav(portfolioId, isManaged);
+        if (navSqrtX96 == 0) {
+            navSqrtX96 = 1;
+        }
+
         uint256 amountSqrtX96 = FixedPointMathLib.sqrt(msg.value);
+
         if (isManaged) {
             managedPortfolios[portfolioId].portfolioToken.mint(msg.sender, amountSqrtX96 / navSqrtX96);
         } else {
@@ -753,8 +758,10 @@ contract PortfolioManager is BaseHook {
         if (navSqrtX96 == 0) {
             navSqrtX96 = 1;
         }
+
         uint256 amountSqrtX96 =
             FixedPointMathLib.sqrt(_normalizeTokenAmount(inputTokenAmount, inputToken.decimals()) * (2 ** 96));
+
         if (isManaged) {
             managedPortfolios[portfolioId].portfolioToken.mint(owner, amountSqrtX96 / navSqrtX96);
         } else {
