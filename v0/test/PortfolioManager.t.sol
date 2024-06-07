@@ -7,6 +7,7 @@ import {
     Currency,
     CurrencyLibrary,
     ERC20,
+    FixedPointMathLib,
     Hooks,
     IERC20,
     IHooks,
@@ -65,21 +66,21 @@ contract PortfolioManagerTest is Test, Deployers {
 
         deployFreshManagerAndRouters();
 
-        // deployCodeTo(
-        //     "PortfolioManagerHarness",
-        //     abi.encode(manager, claimsRouter, modifyLiquidityRouter, swapRouter),
-        //     address(flags)
-        // );
-        // pm = PortfolioManagerHarness(address(flags));
-
-        (address hookAddress, bytes32 salt) = HookMiner.find(
-            address(this),
-            flags,
-            type(PortfolioManagerHarness).creationCode,
-            abi.encode(manager, claimsRouter, modifyLiquidityRouter, swapRouter)
+        deployCodeTo(
+            "PortfolioManagerHarness",
+            abi.encode(manager, claimsRouter, modifyLiquidityRouter, swapRouter),
+            address(flags)
         );
-        pm = new PortfolioManagerHarness{salt: salt}(manager, claimsRouter, modifyLiquidityRouter, swapRouter);
-        require(address(pm) == hookAddress, "PortfolioManager: hook address mismatch");
+        pm = PortfolioManagerHarness(address(flags));
+
+        // (address hookAddress, bytes32 salt) = HookMiner.find(
+        //     address(this),
+        //     flags,
+        //     type(PortfolioManagerHarness).creationCode,
+        //     abi.encode(manager, claimsRouter, modifyLiquidityRouter, swapRouter)
+        // );
+        // pm = new PortfolioManagerHarness{salt: salt}(manager, claimsRouter, modifyLiquidityRouter, swapRouter);
+        // require(address(pm) == hookAddress, "PortfolioManager: hook address mismatch");
 
         (user, userPrivateKey) = makeAddrAndKey("user");
         vm.deal(user, 10 ether);
@@ -140,7 +141,26 @@ contract PortfolioManagerTest is Test, Deployers {
         return assets;
     }
 
-    function test_create() public {
+    function sqrtX96(uint256 n) public pure returns (uint256) {
+        return FixedPointMathLib.sqrt(n * (2 ** 96));
+    }
+
+    // function test_automated_portfolio_native() public {
+    //     // create, mint, rebalance, mint, burn
+    //     PortfolioManager.Asset[] memory assets = new PortfolioManager.Asset[](3);
+    //     assets[0] = PortfolioManager.Asset(Currency.unwrap(usdc), 18, 30_000, 0);
+    //     assets[1] = PortfolioManager.Asset(Currency.unwrap(wbtc), 18, 50_000, 0);
+    //     assets[2] = PortfolioManager.Asset(Currency.unwrap(wsol), 18, 20_000, 0);
+    //     uint256 id = pm.create(sortAssets(assets), address(0), 30, false);
+
+    //     uint256 nav = pm.nav(id, false);
+    //     assertEq(nav, 0);
+
+    //     pm.mint{value: 0.1 ether}(id);
+    // }
+
+    function test_automated_portfolio_erc20() public {
+        // create, mint, rebalance, mint, burn
         PortfolioManager.Asset[] memory assets = new PortfolioManager.Asset[](3);
         assets[0] = PortfolioManager.Asset(Currency.unwrap(eth), 18, 30_000, 0);
         assets[1] = PortfolioManager.Asset(Currency.unwrap(wbtc), 18, 50_000, 0);
@@ -150,42 +170,29 @@ contract PortfolioManagerTest is Test, Deployers {
         uint256 nav = pm.nav(id, false);
         assertEq(nav, 0);
 
+        uint256 inputAmount = 0.1 ether;
+        uint256 inputAmountSqrtX96 = sqrtX96(inputAmount);
+
         // https://book.getfoundry.sh/tutorials/testing-eip712
         IERC20Permit erc20 = IERC20Permit(Currency.unwrap(usdc));
         SigUtils sigUtils = new SigUtils(erc20.DOMAIN_SEPARATOR());
         SigUtils.Permit memory permit =
-            SigUtils.Permit({owner: user, spender: address(pm), value: 0.1 ether, nonce: 0, deadline: 1000 days});
+            SigUtils.Permit({owner: user, spender: address(pm), value: inputAmount, nonce: 0, deadline: 1000 days});
         bytes32 digest = sigUtils.getTypedDataHash(permit);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, digest);
 
+        assertEq(pm.get(id).portfolioToken.balanceOf(user), 0);
         pm.mint(id, ERC20(Currency.unwrap(usdc)), user, address(pm), permit.value, permit.deadline, v, r, s);
-
-        // vm.prank(address(pm));
-        // IERC20(Currency.unwrap(usdc)).approve(address(claimsRouter), type(uint256).max);
-        // claimsRouter.deposit(usdc, address(pm), 0.1 ether);
-        // vm.stopPrank();
+        assertEq(pm.get(id).portfolioToken.balanceOf(user), inputAmountSqrtX96);
+        // pm.burn(id, 0.05 ether);
     }
 
-    // function testPermit() public {
-    //     uint256 privateKey = 0xBEEF;
-    //     address owner = vm.addr(privateKey);
-
-    //     (uint8 v, bytes32 r, bytes32 s) = vm.sign(
-    //         privateKey,
-    //         keccak256(
-    //             abi.encodePacked(
-    //                 "\x19\x01",
-    //                 token.DOMAIN_SEPARATOR(),
-    //                 keccak256(abi.encode(PERMIT_TYPEHASH, owner, address(0xCAFE), 1e18, 0, block.timestamp))
-    //             )
-    //         )
-    //     );
-
-    //     token.permit(owner, address(0xCAFE), 1e18, block.timestamp, v, r, s);
-
-    //     assertEq(token.allowance(owner, address(0xCAFE)), 1e18);
-    //     assertEq(token.nonces(owner), 1);
+    // function test_managed_portfolio_native() public {
+    //     // create, mint, rebalance, update, mint, rebalance, mint, burn
     // }
+    function test_managed_portfolio_erc20() public {
+        // create, mint, rebalance, update, mint, rebalance, mint, burn
+    }
 
     function test_addPair() public {
         (Currency currency0, Currency currency1) = deployMintAndApprove2Currencies();
