@@ -6,7 +6,9 @@ import {Deployers, MockERC20, SortTokens} from "@uniswap/v4-core/test/utils/Depl
 import {
     Currency,
     CurrencyLibrary,
+    ERC20,
     Hooks,
+    IERC20,
     IHooks,
     IPoolManager,
     LPFeeLibrary,
@@ -20,6 +22,8 @@ import {
     StateLibrary
 } from "../src/PortfolioManager.sol";
 import {HookMiner} from "./utils/HookMiner.sol";
+import {SigUtils} from "./utils/SigUtils.sol";
+import {IERC20Permit} from "openzeppelin/token/ERC20/extensions/IERC20Permit.sol";
 
 contract PortfolioManagerHarness is PortfolioManager {
     constructor(
@@ -42,10 +46,13 @@ contract PortfolioManagerTest is Test, Deployers {
     PortfolioManagerHarness public pm;
 
     Currency public eth = CurrencyLibrary.NATIVE;
-    Currency public stablecoin;
+    Currency public usdc;
     Currency public wbtc;
     Currency public wsol;
     Currency public uni;
+
+    address user;
+    uint256 userPrivateKey;
 
     uint24 public constant FEE = 3000;
     IHooks public constant NO_HOOK = IHooks(address(0));
@@ -74,36 +81,45 @@ contract PortfolioManagerTest is Test, Deployers {
         pm = new PortfolioManagerHarness{salt: salt}(manager, claimsRouter, modifyLiquidityRouter, swapRouter);
         require(address(pm) == hookAddress, "PortfolioManager: hook address mismatch");
 
+        (user, userPrivateKey) = makeAddrAndKey("user");
+        vm.deal(user, 10 ether);
         deployTokensAndPools();
     }
 
     function deployTokensAndPools() public {
-        stablecoin = deployMintAndApproveCurrency();
+        usdc = deployMintAndApproveCurrency();
+        wbtc = deployMintAndApproveCurrency();
+        wsol = deployMintAndApproveCurrency();
+        uni = deployMintAndApproveCurrency();
+
+        ERC20(Currency.unwrap(usdc)).transfer(address(pm), 100 ether);
+        ERC20(Currency.unwrap(wbtc)).transfer(address(pm), 100 ether);
+        ERC20(Currency.unwrap(wsol)).transfer(address(pm), 100 ether);
+        ERC20(Currency.unwrap(uni)).transfer(address(pm), 100 ether);
+
+        ERC20(Currency.unwrap(usdc)).transfer(user, 100 ether);
+        ERC20(Currency.unwrap(wbtc)).transfer(user, 100 ether);
+        ERC20(Currency.unwrap(wsol)).transfer(user, 100 ether);
+        ERC20(Currency.unwrap(uni)).transfer(user, 100 ether);
 
         Currency currency0;
         Currency currency1;
         PoolKey memory key;
         PoolId id;
 
-        wbtc = deployMintAndApproveCurrency();
-        (currency0, currency1) =
-            SortTokens.sort(MockERC20(Currency.unwrap(stablecoin)), MockERC20(Currency.unwrap(wbtc)));
+        (currency0, currency1) = SortTokens.sort(MockERC20(Currency.unwrap(usdc)), MockERC20(Currency.unwrap(wbtc)));
         (key,) = initPoolAndAddLiquidity(currency0, currency1, NO_HOOK, FEE, SQRT_PRICE_1_1, ZERO_BYTES);
         pm._addPair(key);
         (key,) = initPoolAndAddLiquidityETH(eth, wbtc, NO_HOOK, FEE, SQRT_PRICE_1_2, ZERO_BYTES, 10 ether);
         pm._addPair(key);
 
-        wsol = deployMintAndApproveCurrency();
-        (currency0, currency1) =
-            SortTokens.sort(MockERC20(Currency.unwrap(stablecoin)), MockERC20(Currency.unwrap(wsol)));
+        (currency0, currency1) = SortTokens.sort(MockERC20(Currency.unwrap(usdc)), MockERC20(Currency.unwrap(wsol)));
         (key,) = initPoolAndAddLiquidity(currency0, currency1, NO_HOOK, FEE, SQRT_PRICE_2_1, ZERO_BYTES);
         pm._addPair(key);
         (key,) = initPoolAndAddLiquidityETH(eth, wsol, NO_HOOK, FEE, SQRT_PRICE_1_4, ZERO_BYTES, 10 ether);
         pm._addPair(key);
 
-        uni = deployMintAndApproveCurrency();
-        (currency0, currency1) =
-            SortTokens.sort(MockERC20(Currency.unwrap(stablecoin)), MockERC20(Currency.unwrap(uni)));
+        (currency0, currency1) = SortTokens.sort(MockERC20(Currency.unwrap(usdc)), MockERC20(Currency.unwrap(uni)));
         (key,) = initPoolAndAddLiquidity(currency0, currency1, NO_HOOK, FEE, SQRT_PRICE_4_1, ZERO_BYTES);
         pm._addPair(key);
         (key, id) = initPoolAndAddLiquidityETH(eth, uni, NO_HOOK, FEE, SQRT_PRICE_1_1, ZERO_BYTES, 10 ether);
@@ -118,24 +134,32 @@ contract PortfolioManagerTest is Test, Deployers {
                 }
             }
         }
-
         return assets;
     }
 
-    function test_create_navUnlock() public {
+    function test_create() public {
         PortfolioManager.Asset[] memory assets = new PortfolioManager.Asset[](3);
-        assets[0] = PortfolioManager.Asset(address(Currency.unwrap(eth)), 18, 30_000, 0);
-        assets[1] = PortfolioManager.Asset(address(Currency.unwrap(wbtc)), 18, 50_000, 0);
-        assets[2] = PortfolioManager.Asset(address(Currency.unwrap(wsol)), 18, 20_000, 0);
-        uint256 id = pm.create(sortAssets(assets), address(Currency.unwrap(stablecoin)), 30, false);
+        assets[0] = PortfolioManager.Asset(Currency.unwrap(eth), 18, 30_000, 0);
+        assets[1] = PortfolioManager.Asset(Currency.unwrap(wbtc), 18, 50_000, 0);
+        assets[2] = PortfolioManager.Asset(Currency.unwrap(wsol), 18, 20_000, 0);
+        uint256 id = pm.create(sortAssets(assets), Currency.unwrap(usdc), 30, false);
 
         uint256 nav = pm.nav(id, false);
         assertEq(nav, 0);
-    }
 
-    function test_t() public {
-        console.logUint((1 * 100_000) / 100);
-        // 0.01 * 100_000 = 1000
+        // https://book.getfoundry.sh/tutorials/testing-eip712
+        IERC20Permit erc20 = IERC20Permit(Currency.unwrap(usdc));
+        SigUtils sigUtils = new SigUtils(erc20.DOMAIN_SEPARATOR());
+        SigUtils.Permit memory permit =
+            SigUtils.Permit({owner: user, spender: address(pm), value: 0.1 ether, nonce: 0, deadline: 1000 days});
+        bytes32 digest = sigUtils.getTypedDataHash(permit);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, digest);
+        pm.mint(id, ERC20(Currency.unwrap(usdc)), user, address(pm), permit.value, permit.deadline, v, r, s);
+
+        // vm.prank(address(pm));
+        // IERC20(Currency.unwrap(usdc)).approve(address(claimsRouter), type(uint256).max);
+        // claimsRouter.deposit(usdc, address(pm), 0.1 ether);
+        // vm.stopPrank();
     }
 
     // function testPermit() public {
@@ -166,7 +190,7 @@ contract PortfolioManagerTest is Test, Deployers {
 
         pm._addPair(poolKey);
 
-        bytes32 hash = pm._hashPair(address(Currency.unwrap(currency0)), address(Currency.unwrap(currency1)));
+        bytes32 hash = pm._hashPair(Currency.unwrap(currency0), Currency.unwrap(currency1));
 
         (Currency _currency0, Currency _currency1, uint24 _fee, int24 _tickSpacing, IHooks _hooks) =
             pm._pairToPoolKey(hash);

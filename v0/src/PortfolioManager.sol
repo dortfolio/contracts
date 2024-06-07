@@ -18,7 +18,7 @@ import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 
 import {BaseHook, Hooks, IHooks, IPoolManager} from "v4-periphery/BaseHook.sol";
 import {Strings} from "openzeppelin/utils/Strings.sol";
-import {PortfolioToken, ERC20} from "./PortfolioToken.sol";
+import {PortfolioToken, ERC20, IERC20} from "./PortfolioToken.sol";
 import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 
 contract PortfolioManager is BaseHook {
@@ -89,6 +89,14 @@ contract PortfolioManager is BaseHook {
     PoolClaimsTest internal claimsRouter;
     PoolModifyLiquidityTest internal modifyLiquidityRouter;
     PoolSwapTest internal swapRouter;
+
+    event SwapEvent(
+        address indexed currency0,
+        address indexed currency1,
+        bool zeroForOne,
+        int256 amountSpecified,
+        uint256 sqrtPriceLimitX96
+    );
 
     error InvalidAssetList();
     error InvalidAssetWeightSum();
@@ -413,6 +421,13 @@ contract PortfolioManager is BaseHook {
 
             // Use poolManager.swap instead of swapRouter.swap because the latter calls unlock
             BalanceDelta balanceDelta = poolManager.swap(swap.poolKey, swap.swapParams, ZERO_BYTES);
+            emit SwapEvent(
+                Currency.unwrap(swap.poolKey.currency0),
+                Currency.unwrap(swap.poolKey.currency1),
+                swap.swapParams.zeroForOne,
+                swap.swapParams.amountSpecified,
+                swap.swapParams.sqrtPriceLimitX96
+            );
             int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
             int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
 
@@ -451,6 +466,13 @@ contract PortfolioManager is BaseHook {
             });
 
             BalanceDelta balanceDelta = poolManager.swap(lastSwap.poolKey, swapParams, ZERO_BYTES);
+            emit SwapEvent(
+                Currency.unwrap(lastSwap.poolKey.currency0),
+                Currency.unwrap(lastSwap.poolKey.currency1),
+                lastSwap.swapParams.zeroForOne,
+                lastSwap.swapParams.amountSpecified,
+                lastSwap.swapParams.sqrtPriceLimitX96
+            );
             int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
             int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
 
@@ -564,6 +586,13 @@ contract PortfolioManager is BaseHook {
 
             // Use poolManager.swap instead of swapRouter.swap because the latter calls unlock
             BalanceDelta balanceDelta = poolManager.swap(swap.poolKey, swap.swapParams, ZERO_BYTES);
+            emit SwapEvent(
+                Currency.unwrap(swap.poolKey.currency0),
+                Currency.unwrap(swap.poolKey.currency1),
+                swap.swapParams.zeroForOne,
+                swap.swapParams.amountSpecified,
+                swap.swapParams.sqrtPriceLimitX96
+            );
             int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
             int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
 
@@ -595,6 +624,13 @@ contract PortfolioManager is BaseHook {
             swap.swapParams.amountSpecified = -1 * int256(inputTokenTotal * allocateWeightList[i] / ASSET_WEIGHT_SUM);
 
             BalanceDelta balanceDelta = poolManager.swap(swap.poolKey, swap.swapParams, ZERO_BYTES);
+            emit SwapEvent(
+                Currency.unwrap(swap.poolKey.currency0),
+                Currency.unwrap(swap.poolKey.currency1),
+                swap.swapParams.zeroForOne,
+                swap.swapParams.amountSpecified,
+                swap.swapParams.sqrtPriceLimitX96
+            );
             int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
             int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
 
@@ -658,7 +694,7 @@ contract PortfolioManager is BaseHook {
             uint256 amount = _normalizeTokenAmount(assetList[i].amountHeld, assetList[i].decimals);
             // (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) = manager.getSlot0(key.toId());
             (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
-            if (address(Currency.unwrap(assetPoolKeys[i].currency0)) == assetList[i].token) {
+            if (Currency.unwrap(assetPoolKeys[i].currency0) == assetList[i].token) {
                 navSqrtX96 += (amount * sqrtPriceX96);
             } else {
                 navSqrtX96 += (amount / sqrtPriceX96);
@@ -698,7 +734,7 @@ contract PortfolioManager is BaseHook {
     //     for (uint8 i = 0; i < assetList.length; i++) {
     //         uint256 amount = _normalizeTokenAmount(assetList[i].amountHeld, assetList[i].decimals);
     //         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
-    //         if (address(Currency.unwrap(assetPoolKeys[i].currency0)) == assetList[i].token) {
+    //         if (Currency.unwrap(assetPoolKeys[i].currency0) == assetList[i].token) {
     //             navSqrtX96 += (amount * sqrtPriceX96);
     //         } else {
     //             navSqrtX96 += (amount / sqrtPriceX96);
@@ -750,6 +786,9 @@ contract PortfolioManager is BaseHook {
         bool isManaged = idToIsManaged[portfolioId];
 
         uint256 navSqrtX96 = nav(portfolioId, isManaged);
+        if (navSqrtX96 == 0) {
+            navSqrtX96 = 1;
+        }
         uint256 amountSqrtX96 =
             FixedPointMathLib.sqrt(_normalizeTokenAmount(inputTokenAmount, inputToken.decimals()) * (2 ** 96));
         if (isManaged) {
@@ -822,6 +861,13 @@ contract PortfolioManager is BaseHook {
 
             // Use poolManager.swap instead of swapRouter.swap because the latter calls unlock
             BalanceDelta balanceDelta = poolManager.swap(swap.poolKey, swap.swapParams, ZERO_BYTES);
+            emit SwapEvent(
+                Currency.unwrap(swap.poolKey.currency0),
+                Currency.unwrap(swap.poolKey.currency1),
+                swap.swapParams.zeroForOne,
+                swap.swapParams.amountSpecified,
+                swap.swapParams.sqrtPriceLimitX96
+            );
             int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
             int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
 
@@ -940,6 +986,13 @@ contract PortfolioManager is BaseHook {
 
             // Use poolManager.swap instead of swapRouter.swap because the latter calls unlock
             BalanceDelta balanceDelta = poolManager.swap(swap.poolKey, swap.swapParams, ZERO_BYTES);
+            emit SwapEvent(
+                Currency.unwrap(swap.poolKey.currency0),
+                Currency.unwrap(swap.poolKey.currency1),
+                swap.swapParams.zeroForOne,
+                swap.swapParams.amountSpecified,
+                swap.swapParams.sqrtPriceLimitX96
+            );
             int128 amount0 = BalanceDeltaLibrary.amount0(balanceDelta);
             int128 amount1 = BalanceDeltaLibrary.amount1(balanceDelta);
 
@@ -985,8 +1038,16 @@ contract PortfolioManager is BaseHook {
     */
 
     function _addPair(PoolKey memory poolKey) public returns (PoolId) {
-        address a = address(Currency.unwrap(poolKey.currency0));
-        address b = address(Currency.unwrap(poolKey.currency1));
+        address a = Currency.unwrap(poolKey.currency0);
+        address b = Currency.unwrap(poolKey.currency1);
+
+        if (a != address(0)) {
+            IERC20(a).approve(address(claimsRouter), type(uint256).max);
+        }
+        if (b != address(0)) {
+            IERC20(b).approve(address(claimsRouter), type(uint256).max);
+        }
+
         bytes32 hash = _hashPair(a, b);
         _pairToPoolKey[hash] = poolKey;
         return poolKey.toId();
@@ -1038,7 +1099,7 @@ contract PortfolioManager is BaseHook {
             portfolioToken = address(p.portfolioToken);
         }
 
-        if (address(Currency.unwrap(key.currency0)) == address(portfolioToken)) {
+        if (Currency.unwrap(key.currency0) == address(portfolioToken)) {
             isBuy = !swapParams.zeroForOne;
         } else {
             isBuy = swapParams.zeroForOne;
