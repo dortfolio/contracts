@@ -94,7 +94,9 @@ contract PortfolioManager is BaseHook {
     error InvalidAssetWeightSum();
     error InvalidBalanceDelta();
     error InvalidBurnAmount();
+    error InvalidMintAmount();
     error InvalidMintSpenderAddress();
+    error InvalidPortfolioAsset();
     error InvalidPortfolioId();
     error InvalidPortfolioInputToken();
     error InvalidPortfolioManager();
@@ -269,6 +271,9 @@ contract PortfolioManager is BaseHook {
         // construct assetAddresses
         address[] memory assetAddresses = new address[](assetList.length);
         for (uint8 i = 0; i < assetList.length; i++) {
+            if (inputToken == assetList[i].token) {
+                revert InvalidPortfolioAsset();
+            }
             assetAddresses[i] = assetList[i].token;
             // state updates
             if (isManaged) {
@@ -658,6 +663,7 @@ contract PortfolioManager is BaseHook {
             uint256 amount = _normalizeTokenAmount(assetList[i].amountHeld, assetList[i].decimals);
             // (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) = manager.getSlot0(key.toId());
             (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(assetPoolKeys[i].toId());
+            // asset in terms of input
             if (Currency.unwrap(assetPoolKeys[i].currency0) == assetList[i].token) {
                 navSqrtX96 += (amount * sqrtPriceX96);
             } else {
@@ -712,26 +718,29 @@ contract PortfolioManager is BaseHook {
     */
 
     // ETH
-    function mint(uint256 portfolioId) public payable validateId(portfolioId) {
-        claimsRouter.deposit(Currency.wrap(address(0)), address(this), msg.value);
-        bool isManaged = idToIsManaged[portfolioId];
+    // function mint(uint256 portfolioId) public payable validateId(portfolioId) {
+    //     if (msg.value == 0) {
+    //         revert InvalidMintAmount();
+    //     }
+    //     claimsRouter.deposit(Currency.wrap(address(0)), address(this), msg.value);
+    //     bool isManaged = idToIsManaged[portfolioId];
 
-        uint256 navSqrtX96 = nav(portfolioId, isManaged);
-        if (navSqrtX96 == 0) {
-            navSqrtX96 = 1;
-        }
+    //     uint256 navSqrtX96 = nav(portfolioId, isManaged);
+    //     if (navSqrtX96 == 0) {
+    //         navSqrtX96 = 1;
+    //     }
 
-        uint256 amountSqrtX96 = FixedPointMathLib.sqrt(msg.value);
+    //     uint256 amountSqrtX96 = FixedPointMathLib.sqrt(msg.value);
 
-        if (isManaged) {
-            managedPortfolios[portfolioId].portfolioToken.mint(msg.sender, amountSqrtX96 / navSqrtX96);
-        } else {
-            portfolios[portfolioId].portfolioToken.mint(msg.sender, amountSqrtX96 / navSqrtX96);
-        }
+    //     if (isManaged) {
+    //         managedPortfolios[portfolioId].portfolioToken.mint(msg.sender, amountSqrtX96 / navSqrtX96);
+    //     } else {
+    //         portfolios[portfolioId].portfolioToken.mint(msg.sender, amountSqrtX96 / navSqrtX96);
+    //     }
 
-        _allocate(portfolioId, msg.value, isManaged);
-        rebalance(portfolioId);
-    }
+    //     _allocate(portfolioId, msg.value, isManaged);
+    //     rebalance(portfolioId);
+    // }
 
     // ERC-20
     function mint(
@@ -745,8 +754,13 @@ contract PortfolioManager is BaseHook {
         bytes32 r,
         bytes32 s
     ) public validateId(portfolioId) {
+        // shares are minted based on sqrtX96(inputAmount)
+
         if (spender != address(this)) {
             revert InvalidMintSpenderAddress();
+        }
+        if (inputTokenAmount == 0) {
+            revert InvalidMintAmount();
         }
         inputToken.permit(owner, spender, inputTokenAmount, deadline, v, r, s);
         inputToken.transferFrom(owner, spender, inputTokenAmount);
