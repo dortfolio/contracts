@@ -145,22 +145,13 @@ contract PortfolioManagerTest is Test, Deployers {
         return FixedPointMathLib.sqrt(n * (2 ** 96));
     }
 
-    // function test_automated_portfolio_native() public {
-    //     // create, mint, rebalance, mint, burn
-    //     PortfolioManager.Asset[] memory assets = new PortfolioManager.Asset[](3);
-    //     assets[0] = PortfolioManager.Asset(Currency.unwrap(usdc), 18, 30_000, 0);
-    //     assets[1] = PortfolioManager.Asset(Currency.unwrap(wbtc), 18, 50_000, 0);
-    //     assets[2] = PortfolioManager.Asset(Currency.unwrap(wsol), 18, 20_000, 0);
-    //     uint256 id = pm.create(sortAssets(assets), address(0), 30, false);
+    // forge test -vvvv --match-test testFuzz_automated_portfolio_erc20
 
-    //     uint256 nav = pm.nav(id, false);
-    //     assertEq(nav, 0);
-
-    //     pm.mint{value: 0.1 ether}(id);
-    // }
-
-    function test_automated_portfolio_erc20() public {
-        // create, mint, rebalance, mint, burn
+    // create, mint, burn, rebalance, burn, mint, rebalance
+    function testFuzz_automated_portfolio_erc20(uint256 inputAmount) public {
+        vm.assume(inputAmount > 0.00001 ether);
+        vm.assume(inputAmount < 1 ether);
+        // create
         PortfolioManager.Asset[] memory assets = new PortfolioManager.Asset[](3);
         assets[0] = PortfolioManager.Asset(Currency.unwrap(eth), 18, 30_000, 0);
         assets[1] = PortfolioManager.Asset(Currency.unwrap(wbtc), 18, 50_000, 0);
@@ -170,29 +161,98 @@ contract PortfolioManagerTest is Test, Deployers {
         uint256 nav = pm.nav(id, false);
         assertEq(nav, 0);
 
-        uint256 inputAmount = 0.1 ether;
+        // uint256 inputAmount = 0.00011 ether;
         uint256 inputAmountSqrtX96 = sqrtX96(inputAmount);
 
         // https://book.getfoundry.sh/tutorials/testing-eip712
-        IERC20Permit erc20 = IERC20Permit(Currency.unwrap(usdc));
-        SigUtils sigUtils = new SigUtils(erc20.DOMAIN_SEPARATOR());
-        SigUtils.Permit memory permit =
-            SigUtils.Permit({owner: user, spender: address(pm), value: inputAmount, nonce: 0, deadline: 1000 days});
-        bytes32 digest = sigUtils.getTypedDataHash(permit);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, digest);
+        IERC20Permit erc20;
+        SigUtils sigUtils;
+        uint8 v;
+        bytes32 r;
+        bytes32 s;
+        SigUtils.Permit memory permit;
+        bytes32 digest;
+
+        // mint
+        erc20 = IERC20Permit(Currency.unwrap(usdc));
+        sigUtils = new SigUtils(erc20.DOMAIN_SEPARATOR());
+        permit = SigUtils.Permit({owner: user, spender: address(pm), value: inputAmount, nonce: 0, deadline: 1000 days});
+        digest = sigUtils.getTypedDataHash(permit);
+        (v, r, s) = vm.sign(userPrivateKey, digest);
 
         assertEq(pm.get(id).portfolioToken.balanceOf(user), 0);
         pm.mint(id, ERC20(Currency.unwrap(usdc)), user, address(pm), permit.value, permit.deadline, v, r, s);
-        assertEq(pm.get(id).portfolioToken.balanceOf(user), inputAmountSqrtX96);
-        // pm.burn(id, 0.05 ether);
+        assertApproxEqAbs(pm.get(id).portfolioToken.balanceOf(user), inputAmountSqrtX96, 1 wei);
+        nav = pm.nav(id, false);
+
+        // burn
+        sigUtils = new SigUtils(pm.get(id).portfolioToken.DOMAIN_SEPARATOR());
+        permit = SigUtils.Permit({
+            owner: user,
+            spender: address(pm),
+            value: inputAmountSqrtX96 / 2,
+            nonce: 0,
+            deadline: 1000 days
+        });
+        digest = sigUtils.getTypedDataHash(permit);
+        (v, r, s) = vm.sign(userPrivateKey, digest);
+        pm.burn(id, user, address(pm), permit.value, permit.deadline, v, r, s);
+        assertApproxEqAbs(pm.get(id).portfolioToken.balanceOf(user), inputAmountSqrtX96 / 2, 1 wei);
+        assertGt(nav, pm.nav(id, false));
+        nav = pm.nav(id, false);
+
+        // rebalance
+        pm.rebalance(id);
+        assertEq(nav, pm.nav(id, false));
+        vm.warp(block.timestamp + 31 days);
+        pm.rebalance(id);
+        assertNotEq(nav, pm.nav(id, false));
+        nav = pm.nav(id, false);
+
+        // burn
+        sigUtils = new SigUtils(pm.get(id).portfolioToken.DOMAIN_SEPARATOR());
+        permit = SigUtils.Permit({
+            owner: user,
+            spender: address(pm),
+            value: inputAmountSqrtX96 / 2,
+            nonce: 1,
+            deadline: 1000 days
+        });
+        digest = sigUtils.getTypedDataHash(permit);
+        (v, r, s) = vm.sign(userPrivateKey, digest);
+        pm.burn(id, user, address(pm), permit.value, permit.deadline, v, r, s);
+        assertGt(nav, pm.nav(id, false));
+        nav = pm.nav(id, false);
+
+        // mint
+        erc20 = IERC20Permit(Currency.unwrap(usdc));
+        sigUtils = new SigUtils(erc20.DOMAIN_SEPARATOR());
+        permit = SigUtils.Permit({
+            owner: user,
+            spender: address(pm),
+            value: inputAmount / 300,
+            nonce: 1,
+            deadline: 1000 days
+        });
+        digest = sigUtils.getTypedDataHash(permit);
+        (v, r, s) = vm.sign(userPrivateKey, digest);
+
+        pm.mint(id, ERC20(Currency.unwrap(usdc)), user, address(pm), permit.value, permit.deadline, v, r, s);
+        assertLt(nav, pm.nav(id, false));
+        nav = pm.nav(id, false);
+
+        // rebalance
+        pm.rebalance(id);
+        assertEq(nav, pm.nav(id, false));
+        vm.warp(block.timestamp + 31 days);
+        pm.rebalance(id);
+        assertNotEq(nav, pm.nav(id, false));
+        nav = pm.nav(id, false);
     }
 
-    // function test_managed_portfolio_native() public {
-    //     // create, mint, rebalance, update, mint, rebalance, mint, burn
-    // }
-    function test_managed_portfolio_erc20() public {
-        // create, mint, rebalance, update, mint, rebalance, mint, burn
-    }
+    // function testFuzz_automated_portfolio_native() public {}
+    // function testFuzz_managed_portfolio_erc20() public {}
+    // function testFuzz_managed_portfolio_native() public {}
 
     function test_addPair() public {
         (Currency currency0, Currency currency1) = deployMintAndApprove2Currencies();
