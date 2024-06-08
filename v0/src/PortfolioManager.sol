@@ -773,8 +773,7 @@ contract PortfolioManager is BaseHook {
             navSqrtX96 = 1;
         }
 
-        uint256 amountSqrtX96 =
-            FixedPointMathLib.sqrt(_normalizeTokenAmount(inputTokenAmount, inputToken.decimals()) * (2 ** 96));
+        uint256 amountSqrtX96 = sqrtX96(_normalizeTokenAmount(inputTokenAmount, inputToken.decimals()));
 
         if (isManaged) {
             managedPortfolios[portfolioId].portfolioToken.mint(owner, amountSqrtX96 / navSqrtX96);
@@ -812,7 +811,7 @@ contract PortfolioManager is BaseHook {
                 poolKey: _pairToPoolKey[_hashPair(inputToken, asset.token)],
                 swapParams: IPoolManager.SwapParams({
                     zeroForOne: inputToken < asset.token,
-                    amountSpecified: -1 * int256(inputTokenAmount / asset.targetWeight * ASSET_WEIGHT_SUM),
+                    amountSpecified: -1 * int256(inputTokenAmount * asset.targetWeight / ASSET_WEIGHT_SUM),
                     sqrtPriceLimitX96: inputToken < asset.token ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
                 }),
                 testSettings: PoolSwapTest.TestSettings({takeClaims: true, settleUsingBurn: true})
@@ -871,25 +870,43 @@ contract PortfolioManager is BaseHook {
         return assetAmounts;
     }
 
-    function burn(uint256 portfolioId, uint256 portfolioTokenAmount) public validateId(portfolioId) {
+    function burn(
+        uint256 portfolioId,
+        address owner,
+        address spender,
+        uint256 portfolioTokenAmount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public validateId(portfolioId) {
+        if (spender != address(this)) {
+            revert InvalidMintSpenderAddress();
+        }
+        if (portfolioTokenAmount == 0) {
+            revert InvalidBurnAmount();
+        }
+        PortfolioToken portfolioToken;
         uint256 portfolioTokenTotalSupply;
         bool isManaged = idToIsManaged[portfolioId];
 
         if (isManaged) {
             ManagedPortfolio memory managedPortfolio = managedPortfolios[portfolioId];
-            if (managedPortfolio.portfolioToken.balanceOf(msg.sender) < portfolioTokenAmount) {
+            if (managedPortfolio.portfolioToken.balanceOf(owner) < portfolioTokenAmount) {
                 revert InvalidBurnAmount();
             }
+            portfolioToken = managedPortfolio.portfolioToken;
             portfolioTokenTotalSupply = managedPortfolio.portfolioToken.totalSupply();
-            managedPortfolios[portfolioId].portfolioToken.burn(msg.sender, portfolioTokenAmount);
         } else {
             Portfolio memory portfolio = portfolios[portfolioId];
-            if (portfolio.portfolioToken.balanceOf(msg.sender) < portfolioTokenAmount) {
+            if (portfolio.portfolioToken.balanceOf(owner) < portfolioTokenAmount) {
                 revert InvalidBurnAmount();
             }
+            portfolioToken = portfolio.portfolioToken;
             portfolioTokenTotalSupply = portfolio.portfolioToken.totalSupply();
-            portfolios[portfolioId].portfolioToken.burn(msg.sender, portfolioTokenAmount);
         }
+        portfolioToken.permit(owner, spender, portfolioTokenAmount, deadline, v, r, s);
+        portfolioToken.burn(owner, portfolioTokenAmount);
 
         _deallocate(portfolioId, portfolioTokenAmount, portfolioTokenTotalSupply, isManaged);
         rebalance(portfolioId);
@@ -1125,6 +1142,10 @@ contract PortfolioManager is BaseHook {
         } else {
             return tokenAmount;
         }
+    }
+
+    function sqrtX96(uint256 n) internal pure returns (uint256) {
+        return FixedPointMathLib.sqrt(n * (2 ** 96));
     }
 
     /*
