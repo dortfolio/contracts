@@ -93,11 +93,6 @@ contract PortfolioManagerTest is Test, Deployers {
         wsol = deployMintAndApproveCurrency();
         uni = deployMintAndApproveCurrency();
 
-        ERC20(Currency.unwrap(usdc)).transfer(address(pm), 100 ether);
-        ERC20(Currency.unwrap(wbtc)).transfer(address(pm), 100 ether);
-        ERC20(Currency.unwrap(wsol)).transfer(address(pm), 100 ether);
-        ERC20(Currency.unwrap(uni)).transfer(address(pm), 100 ether);
-
         ERC20(Currency.unwrap(usdc)).transfer(user, 100 ether);
         ERC20(Currency.unwrap(wbtc)).transfer(user, 100 ether);
         ERC20(Currency.unwrap(wsol)).transfer(user, 100 ether);
